@@ -1,20 +1,20 @@
 ---
 name: pytorch-pytest-ops
-description: Operate and diagnose the local PyTorch pytest infrastructure under /workspace/torch_test. Use when asked to generate exact dry-run, full-run, subset, distributed, resume, rerun, stable-failure, nohup, environment-variable, status-inspection, completion-validation, case-query, or failure-report commands; inspect PyTorch test result directories or processes; explain timeout/crash recovery and reports; or maintain the testing workflow documentation.
+description: Operate and diagnose the local PyTorch pytest infrastructure under /workspace/pytorch-pytest-ops/runners. Use when asked to generate exact dry-run, full-run, subset, distributed, resume, rerun, stable-failure, nohup, environment-variable, status-inspection, completion-validation, case-query, or failure-report commands; inspect PyTorch test result directories or processes; explain timeout/crash recovery and reports; or maintain the testing workflow documentation.
 ---
 
 # PyTorch Pytest Operations
 
-Use the current runner source as the authority and give commands that are directly runnable in the user's environment.
+Use the bundled runner source as the authority and give commands that are directly runnable in the user's environment.
 
 ## Establish Context
 
 1. Resolve the current paths. In this environment, start with:
    - PyTorch source: `/workspace/pytorch`
-   - runners: `/workspace/torch_test`
+   - runners: `/workspace/pytorch-pytest-ops/runners`
    - environment: `/home/tmp/python_and_sh/env.sh`
-   - workflow: `/workspace/torch_test/PYTORCH_PYTEST_WORKFLOW.md`
-2. Inspect the relevant runner source or `--help` before composing commands. Do not rely on remembered flags when the local source is available.
+   - workflow: `/workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md`
+2. Inspect the relevant bundled runner source or `--help` before composing commands. Do not rely on remembered flags when the source is available.
 3. Read only the relevant workflow section. Use `grep -n`, `sed`, or `rg` when installed.
 4. Preserve user-provided work directories, environment variables, GPU IDs, timeout values, and runner choice across resume commands.
 
@@ -71,7 +71,7 @@ For `pytest-failure-files`, include `--publish-to-work-dir <original-full-work-d
 - Do not claim “no omissions” solely because a runner exited. Report the exact plan/checkpoint/missing/unresolved counts.
 - Prefer `grep -E` fallbacks because `rg` may be unavailable in runtime containers.
 - Treat runner source as newer than bundled examples. If flags differ, follow source and mention the discrepancy.
-- Keep `/workspace/torch_test/PYTORCH_PYTEST_WORKFLOW.md` synchronized when changing runner behavior or durable operating procedures.
+- Keep `/workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md` synchronized when changing runner behavior or durable operating procedures.
 
 ## Response Shape
 

@@ -11,7 +11,7 @@ WORK=/home/tmp/torch2.13/log-final/pytest_full_nmz_new
 mkdir -p "$WORK"
 
 nohup env PYTHONUNBUFFERED=1 \
-  python3 -u /workspace/torch_test/run_pytorch_tests_prefix.py \
+  python3 -u /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
   /workspace/pytorch \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --work-dir "$WORK" \
@@ -31,7 +31,7 @@ Resume with the same command and work directory, remove `--fresh`, and normally 
 
 ```bash
 source /home/tmp/python_and_sh/env.sh
-python3 /workspace/torch_test/run_pytorch_tests_prefix.py \
+python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
   /workspace/pytorch \
   --work-dir "$WORK" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
@@ -44,7 +44,7 @@ This creates `$WORK/test_files.txt` and does not execute tests.
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/torch_test/run_pytorch_tests_prefix.py \
+  /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
   /workspace/pytorch \
   --work-dir "$WORK" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
@@ -58,7 +58,7 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/torch_test/run_pytorch_subset.py pytest-list \
+  /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py pytest-list \
   /workspace/pytorch \
   --test-list /path/to/test_files.txt \
   --include-prefix inductor/,dynamo/ \
@@ -72,7 +72,7 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/torch_test/run_pytorch_subset.py pytest-failure-files \
+  /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py pytest-failure-files \
   /workspace/pytorch \
   --failure-csv "$BASE/latest/unresolved_process_failures.csv" \
   --work-dir "$WORK" \
@@ -89,7 +89,7 @@ For a completed supplemental run that only needs publication, reuse the same arg
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/torch_test/rerun_stable_failures.py \
+  /workspace/pytorch-pytest-ops/runners/rerun_stable_failures.py \
   /workspace/pytorch /path/to/failure_report.csv \
   --attempts 3 \
   --timeout 600 \
@@ -102,10 +102,10 @@ Inspect current `--help` for generic CSV column filters before supplying filter 
 
 ## Official distributed resume
 
-Use the current documented command from the distributed section of `/workspace/torch_test/PYTORCH_PYTEST_WORKFLOW.md`, then verify flags against:
+Use the current documented command from the distributed section of `/workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md`, then verify flags against:
 
 ```bash
-python3 /workspace/torch_test/run_pytorch_subset.py run-test-resume --help
+python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py run-test-resume --help
 ```
 
 Keep official `run_test.py` arguments after `--`. Use the same work directory and remove the fresh/reset option on resume.

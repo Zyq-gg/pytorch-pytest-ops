@@ -28,16 +28,25 @@ PyTorch 测试并不只有一种入口。本项目所在环境同时使用：
 
 ## 与测试脚本的关系
 
-skill 本身不复制 PyTorch runner，而是读取当前机器上的实际源码作为权威依据。默认环境为：
+仓库同时包含 Codex skill 和当前推荐的 PyTorch runner。clone 完成后不再依赖原机器上的 `/workspace/torch_test`，默认环境为：
 
 ```text
 PyTorch source: /workspace/pytorch
-Test runners:   /workspace/torch_test
+Test runners:   /workspace/pytorch-pytest-ops/runners
 Environment:    /home/tmp/python_and_sh/env.sh
-Workflow doc:   /workspace/torch_test/PYTORCH_PYTEST_WORKFLOW.md
+Workflow doc:   /workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md
 ```
 
-runner 参数发生变化时，应以本地脚本源码和 `--help` 为准，而不是机械套用旧命令模板。
+仓库中的 `runners/` 是可执行实现，skill 会先检查这些脚本源码和 `--help`，再生成命令。`docs/PYTORCH_PYTEST_WORKFLOW.md` 是与该版本 runner 配套的详细操作手册。
+
+运行测试仍需要目标机器上已有：
+
+- 一份 PyTorch 源码树，例如 `/workspace/pytorch`
+- 能够导入该 PyTorch 构建的 Python/ROCm 测试环境
+- 对应的环境初始化脚本，例如 `/home/tmp/python_and_sh/env.sh`
+- Linux、Python 3、pytest，以及测试需要的 GPU/ROCm 运行环境
+
+PyTorch 源码路径、环境脚本、GPU 和输出目录都可以在实际命令中修改，不要求与示例机器完全一致。
 
 ## 安装
 
@@ -57,6 +66,14 @@ ln -s /workspace/pytorch-pytest-ops \
 ```
 
 如果目标链接已经存在，先确认它是否已经指向当前仓库，不要直接覆盖未知目录。
+
+验证 runner：
+
+```bash
+python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py --help
+python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py --help
+python3 /workspace/pytorch-pytest-ops/runners/rerun_stable_failures.py --help
+```
 
 ## 使用
 
@@ -107,6 +124,45 @@ python3 /workspace/pytorch-pytest-ops/scripts/inspect_test_run.py \
 
 进程检查只覆盖执行脚本的当前机器。如果日志目录位于共享存储、进程实际运行在另一节点，应在对应节点检查进程，并以 checkpoint、summary 和最终报告共同判断结果。
 
+## Clone 后直接跑测试
+
+只生成普通 pytest 清单，不执行测试：
+
+```bash
+source /home/tmp/python_and_sh/env.sh
+
+python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
+  /workspace/pytorch \
+  --work-dir /home/tmp/torch2.13/pytest_dry_run \
+  --gpu-ids 0,1,2,3,4,5,6,7 \
+  --dry-run-only
+```
+
+正式后台运行普通 pytest 全量：
+
+```bash
+source /home/tmp/python_and_sh/env.sh
+
+WORK=/home/tmp/torch2.13/pytest_full
+mkdir -p "$WORK"
+
+nohup env PYTHONUNBUFFERED=1 \
+  python3 -u /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
+  /workspace/pytorch \
+  --work-dir "$WORK" \
+  --gpu-ids 0,1,2,3,4,5,6,7 \
+  --timeout 1800 \
+  --process-rerun \
+  --process-rerun-error-types Timeout,Crash \
+  --process-rerun-timeout 14400 \
+  --fresh \
+  > "$WORK/runner.out" 2>&1 &
+
+echo $! > "$WORK/runner.pid"
+```
+
+distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `docs/PYTORCH_PYTEST_WORKFLOW.md`。
+
 ## 验收原则
 
 普通 pytest 任务不能只凭“进程消失”认定完成。至少应确认：
@@ -123,17 +179,28 @@ python3 /workspace/pytorch-pytest-ops/scripts/inspect_test_run.py \
 
 ```text
 pytorch-pytest-ops/
+  README.md
   SKILL.md
   agents/openai.yaml
+  docs/
+    PYTORCH_PYTEST_WORKFLOW.md
   references/
     commands.md
     runner-selection.md
     status-and-reports.md
   scripts/
     inspect_test_run.py
+  runners/
+    run_pytorch_tests_prefix.py
+    run_pytorch_subset.py
+    rerun_stable_failures.py
+    run_official_run_test_queue.py
+    run_test-2.13-official-queue.sh
 ```
 
 - `SKILL.md`：Codex 的核心操作规则
+- `runners/`：clone 后可直接执行的测试 runner
+- `docs/PYTORCH_PYTEST_WORKFLOW.md`：完整测试流程文档
 - `references/commands.md`：常用命令模板
 - `references/runner-selection.md`：测试入口选择
 - `references/status-and-reports.md`：状态和报告语义
