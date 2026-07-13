@@ -48,6 +48,8 @@ Workflow doc:   /workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md
 
 PyTorch 源码路径、环境脚本、GPU 和输出目录都可以在实际命令中修改，不要求与示例机器完全一致。
 
+普通 pytest runner 已兼容 PyTorch 2.9 的平面 stepcurrent cache（`stepcurrent/<key>`）和当前 2.13 的目录 cache（`stepcurrent/<key>/lastrun`）。
+
 ## 安装
 
 克隆到 `/workspace`：
@@ -196,6 +198,8 @@ pytorch-pytest-ops/
     rerun_stable_failures.py
     run_official_run_test_queue.py
     run_test-2.13-official-queue.sh
+  tests/
+    test_stepcurrent_cache_compat.py
 ```
 
 - `SKILL.md`：Codex 的核心操作规则
@@ -205,6 +209,7 @@ pytorch-pytest-ops/
 - `references/runner-selection.md`：测试入口选择
 - `references/status-and-reports.md`：状态和报告语义
 - `scripts/inspect_test_run.py`：只读目录检查器
+- `tests/test_stepcurrent_cache_compat.py`：PyTorch 2.9/2.13 stepcurrent 布局回归测试
 
 ## 安全边界
 

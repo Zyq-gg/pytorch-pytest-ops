@@ -505,18 +505,25 @@ def read_stepcurrent_lastrun(test_dir: str, key: str) -> str:
     # pytest chooses the repository root from pytest.ini, even though commands
     # run with cwd=<repo>/test. Match official run_test.py and check the repo
     # root first; retain the old location as a compatibility fallback.
+    # PyTorch 2.9 stores the value directly at stepcurrent/<key>, while newer
+    # versions store it at stepcurrent/<key>/lastrun.
     cache_roots = [os.path.dirname(os.path.abspath(test_dir)), os.path.abspath(test_dir)]
     raw = ""
     for cache_root in cache_roots:
-        cache_file = os.path.join(
-            cache_root, ".pytest_cache", "v", "cache", "stepcurrent", key, "lastrun"
+        cache_entry = os.path.join(
+            cache_root, ".pytest_cache", "v", "cache", "stepcurrent", key
         )
-        try:
-            with open(cache_file, encoding="utf-8") as f:
-                raw = f.read().strip()
+        for cache_file in (os.path.join(cache_entry, "lastrun"), cache_entry):
+            try:
+                with open(cache_file, encoding="utf-8") as f:
+                    raw = f.read().strip()
+                break
+            except OSError:
+                # Missing entries and file-vs-directory layout mismatches must
+                # fall back to the other supported format, not kill a worker.
+                continue
+        if raw:
             break
-        except FileNotFoundError:
-            continue
     if not raw or raw == "null":
         return ""
     try:

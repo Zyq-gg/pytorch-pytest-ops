@@ -71,6 +71,7 @@ For `pytest-failure-files`, include `--publish-to-work-dir <original-full-work-d
 - Do not claim “no omissions” solely because a runner exited. Report the exact plan/checkpoint/missing/unresolved counts.
 - Prefer `grep -E` fallbacks because `rg` may be unavailable in runtime containers.
 - Treat runner source as newer than bundled examples. If flags differ, follow source and mention the discrepancy.
+- When diagnosing stepcurrent recovery, account for both PyTorch 2.9 `stepcurrent/<key>` and newer `stepcurrent/<key>/lastrun` cache layouts.
 - Keep `/workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md` synchronized when changing runner behavior or durable operating procedures.
 
 ## Response Shape

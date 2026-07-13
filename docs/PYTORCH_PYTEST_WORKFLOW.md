@@ -316,13 +316,14 @@ nohup env PYTHONUNBUFFERED=1 python3 -u /workspace/pytorch-pytest-ops/runners/ru
 --sc=<stepcurrent_key> --print-items
 ```
 
-PyTorch `test/conftest.py` 会把当前运行的 item 写到：
+PyTorch `test/conftest.py` 会把当前运行的 item 写入 pytest cache。不同版本的物理布局不同：
 
 ```text
-/workspace/pytorch/.pytest_cache/v/cache/stepcurrent/<stepcurrent_key>/lastrun
+PyTorch 2.9:        /workspace/pytorch/.pytest_cache/v/cache/stepcurrent/<stepcurrent_key>
+本地 PyTorch 2.13: /workspace/pytorch/.pytest_cache/v/cache/stepcurrent/<stepcurrent_key>/lastrun
 ```
 
-进程 timeout/crash 后，脚本优先读取这个 `lastrun`，尽量得到具体 case。
+runner 会先探测新版目录布局，再兼容读取 2.9 的平面文件布局。进程 timeout/crash 后，脚本优先读取这个断点，尽量得到具体 case。cache 不存在、尚未写入或文件/目录类型不匹配时只会判定 stepcurrent 不可用并进入 fallback，不允许因此让 GPU worker 异常退出。
 
 第二层：借鉴官方 `run_test.py` 的 `--rs` / `--scs` 继续机制。
 
@@ -545,6 +546,8 @@ grep -R "test_aot_compile" /home/tmp/torch2.13/pytest_full_nmz/latest/*.log
 ```
 
 新版已经修正。历史全量不需要全部重跑：先在 process rerun 已有 `summary.json` 后执行 `--analyze-only` 生成 `unresolved_process_failures.csv`，再按 3.3 只重跑其中的文件。重新分析只重建报告，不能追溯执行当时错过的 `--rs/--scs`。
+
+2026-07-13 增加 PyTorch 2.9/2.13 cache 布局兼容。旧 runner 固定读取 `<key>/lastrun`，在 2.9 中 `<key>` 本身是文件，因此会抛 `NotADirectoryError` 并让 worker 提前退出。新版同时读取 `<key>/lastrun` 和 `<key>`，并把候选路径读取失败降级为 stepcurrent unavailable。已经因该异常退出的任务不会因代码升级自动补回：等待或停止旧 parent runner 后，使用同一个 work-dir、相同 GPU/timeout/环境参数续跑，并去掉 `--fresh`；checkpoint 中缺失的真实文件会重新进入队列。正在运行的 Python 进程已经加载旧模块，必须启动新的续跑进程才会使用修复。
 
 2026-07-12 又修正了两个后续问题：空 `--scs` 分片返回码 `5` 未按官方语义处理，以及恢复完成后旧 process-level 行仍进入 unresolved 报告。已经完成的测试无需因此再执行；对已有日志运行 `--analyze-only` 即可按新规则重建报告。分析目标是当前 `latest` 时，脚本还会同步更新根目录 `summary.json.failure_reports`；分析旧 timestamp 时不会覆盖当前汇总。只有日志没有恢复完成标记、确实仍列在新 `unresolved_process_failure_files.txt` 中的文件，才需要按 3.3 补跑。
 
