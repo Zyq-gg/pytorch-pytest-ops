@@ -339,6 +339,12 @@ def run_command_to_log(
 
 
 def run_pytest_list(args: argparse.Namespace) -> None:
+    if args.recovery_case_timeout < 0:
+        raise SystemExit("--recovery-case-timeout must be >= 0")
+    if args.recovery_attempts < 1:
+        raise SystemExit("--recovery-attempts must be >= 1")
+    if args.recovery_max_total_time < 0:
+        raise SystemExit("--recovery-max-total-time must be >= 0")
     pytorch_root = Path(args.pytorch_root).resolve()
     test_dir = pytorch_root / "test"
     test_list = Path(args.test_list).resolve()
@@ -436,6 +442,9 @@ def run_pytest_list(args: argparse.Namespace) -> None:
                 args.timeout,
                 not args.no_crash_recovery,
                 args.crash_chunk_size,
+                args.recovery_case_timeout,
+                args.recovery_attempts,
+                args.recovery_max_total_time,
             ): gpu_ids[worker_idx]
             for worker_idx in range(min(len(gpu_ids), len(remaining)))
         }
@@ -771,6 +780,9 @@ def main() -> None:
     pytest_parser.add_argument("--dry-run-only", action="store_true")
     pytest_parser.add_argument("--no-crash-recovery", action="store_true")
     pytest_parser.add_argument("--crash-chunk-size", type=int, default=16)
+    pytest_parser.add_argument("--recovery-case-timeout", type=int, default=600)
+    pytest_parser.add_argument("--recovery-attempts", type=int, default=3)
+    pytest_parser.add_argument("--recovery-max-total-time", type=int, default=7200)
     pytest_parser.add_argument("--analyze", dest="analyze", action="store_true")
     pytest_parser.add_argument("--no-analyze", dest="analyze", action="store_false")
     pytest_parser.set_defaults(analyze=True)
@@ -807,6 +819,9 @@ def main() -> None:
     failure_files_parser.add_argument("--dry-run-only", action="store_true")
     failure_files_parser.add_argument("--no-crash-recovery", action="store_true")
     failure_files_parser.add_argument("--crash-chunk-size", type=int, default=16)
+    failure_files_parser.add_argument("--recovery-case-timeout", type=int, default=600)
+    failure_files_parser.add_argument("--recovery-attempts", type=int, default=3)
+    failure_files_parser.add_argument("--recovery-max-total-time", type=int, default=7200)
     failure_files_parser.add_argument("--analyze", dest="analyze", action="store_true")
     failure_files_parser.add_argument("--no-analyze", dest="analyze", action="store_false")
     failure_files_parser.set_defaults(analyze=True)

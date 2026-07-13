@@ -16,6 +16,9 @@ nohup env PYTHONUNBUFFERED=1 \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --work-dir "$WORK" \
   --timeout 1800 \
+  --recovery-case-timeout 600 \
+  --recovery-attempts 3 \
+  --recovery-max-total-time 7200 \
   --process-rerun \
   --process-rerun-error-types Timeout,Crash \
   --process-rerun-timeout 14400 \
@@ -50,6 +53,9 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --include-prefix inductor/,dynamo/ \
   --timeout 1800 \
+  --recovery-case-timeout 600 \
+  --recovery-attempts 3 \
+  --recovery-max-total-time 7200 \
   --process-rerun-timeout 14400 \
   --fresh > "$WORK/runner.out" 2>&1 &
 ```
@@ -65,6 +71,9 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
   --work-dir "$WORK" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --timeout 1800 \
+  --recovery-case-timeout 600 \
+  --recovery-attempts 3 \
+  --recovery-max-total-time 7200 \
   --fresh > "$WORK/runner.out" 2>&1 &
 ```
 
@@ -80,6 +89,9 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
   --error-type Timeout,Crash \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --timeout 14400 \
+  --recovery-case-timeout 600 \
+  --recovery-attempts 3 \
+  --recovery-max-total-time 7200 \
   --fresh > "$WORK/runner.out" 2>&1 &
 ```
 

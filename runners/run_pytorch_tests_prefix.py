@@ -27,6 +27,7 @@ import concurrent.futures
 import csv
 import fcntl
 import json
+import math
 import os
 import pty
 import queue
@@ -89,6 +90,23 @@ FAILURE_CSV_FIELDS = [
 
 _progress_lock = threading.Lock()
 _shutdown_flag = threading.Event()
+
+
+class RecoveryBudgetExceeded(RuntimeError):
+    pass
+
+
+def bounded_recovery_timeout(timeout: int, deadline: float | None) -> int:
+    """Cap one recovery subprocess timeout by the remaining file budget."""
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RecoveryBudgetExceeded("recovery total time budget exhausted")
+    remaining_seconds = max(1, math.ceil(remaining))
+    if timeout <= 0:
+        return remaining_seconds
+    return min(timeout, remaining_seconds)
 
 
 def make_test_env() -> dict[str, str]:
@@ -541,6 +559,9 @@ def run_recovery_targets(
     log,
     timeout: int,
     chunk_size: int,
+    deadline: float | None = None,
+    max_attempts: int = 3,
+    attempt_number: int = 1,
 ) -> tuple[dict[str, int], list[tuple[str, str, float]], bool]:
     stats = empty_case_stats()
     failures: list[tuple[str, str, float]] = []
@@ -553,15 +574,18 @@ def run_recovery_targets(
 
     start = time.time()
     try:
+        command_timeout = bounded_recovery_timeout(timeout, deadline)
         returncode, output = run_with_pty(
             pytest_cmd,
             cwd=test_dir,
             env=env,
-            timeout=timeout if timeout > 0 else None,
+            timeout=command_timeout if command_timeout > 0 else None,
         )
         elapsed = time.time() - start
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RecoveryBudgetExceeded("recovery total time budget exhausted")
         if len(targets) > 1:
             mid = max(1, len(targets) // 2)
             left_stats, left_failures, left_failed = run_recovery_targets(
@@ -571,6 +595,8 @@ def run_recovery_targets(
                 log=log,
                 timeout=timeout,
                 chunk_size=chunk_size,
+                deadline=deadline,
+                max_attempts=max_attempts,
             )
             right_stats, right_failures, right_failed = run_recovery_targets(
                 targets=targets[mid:],
@@ -579,12 +605,30 @@ def run_recovery_targets(
                 log=log,
                 timeout=timeout,
                 chunk_size=chunk_size,
+                deadline=deadline,
+                max_attempts=max_attempts,
             )
             add_case_stats(stats, left_stats)
             add_case_stats(stats, right_stats)
             return stats, left_failures + right_failures, left_failed or right_failed
 
         nodeid = targets[0]
+        if attempt_number < max_attempts:
+            log.write(
+                f"===== RECOVERY RETRY: {nodeid} after timeout "
+                f"attempt {attempt_number}/{max_attempts} =====\n"
+            )
+            return run_recovery_targets(
+                targets=targets,
+                test_dir=test_dir,
+                env=env,
+                log=log,
+                timeout=timeout,
+                chunk_size=chunk_size,
+                deadline=deadline,
+                max_attempts=max_attempts,
+                attempt_number=attempt_number + 1,
+            )
         stats["unknown"] += 1
         any_failed = True
         message = f"timeout (>{timeout}s)"
@@ -611,6 +655,8 @@ def run_recovery_targets(
                 log=log,
                 timeout=timeout,
                 chunk_size=chunk_size,
+                deadline=deadline,
+                max_attempts=max_attempts,
             )
             right_stats, right_failures, right_failed = run_recovery_targets(
                 targets=targets[mid:],
@@ -619,12 +665,30 @@ def run_recovery_targets(
                 log=log,
                 timeout=timeout,
                 chunk_size=chunk_size,
+                deadline=deadline,
+                max_attempts=max_attempts,
             )
             add_case_stats(stats, left_stats)
             add_case_stats(stats, right_stats)
             return stats, left_failures + right_failures, left_failed or right_failed
 
         nodeid = targets[0]
+        if attempt_number < max_attempts:
+            log.write(
+                f"===== RECOVERY RETRY: {nodeid} after crash "
+                f"attempt {attempt_number}/{max_attempts} =====\n"
+            )
+            return run_recovery_targets(
+                targets=targets,
+                test_dir=test_dir,
+                env=env,
+                log=log,
+                timeout=timeout,
+                chunk_size=chunk_size,
+                deadline=deadline,
+                max_attempts=max_attempts,
+                attempt_number=attempt_number + 1,
+            )
         stats["unknown"] += 1
         any_failed = True
         message = crash_message(output, returncode)
@@ -687,18 +751,19 @@ def recover_with_stepcurrent_resume(
     test_dir: str,
     env: dict[str, str],
     log,
-    timeout: int,
+    resume_timeout: int,
+    case_timeout: int,
     stepcurrent_key: str,
     initial_error_type: str,
     initial_message: str,
     max_failures_per_case: int = 3,
-    max_iterations: int = 200,
-) -> tuple[dict[str, int], list[tuple[str, str, float]], bool, bool]:
+    deadline: float | None = None,
+) -> tuple[dict[str, int], list[tuple[str, str, float]], bool, bool, bool]:
     """Resume a crashed/timed-out pytest file using PyTorch's stepcurrent plugin.
 
-    Returns (case_stats, failures, any_failed, completed). completed=False means
-    the stepcurrent cache was unavailable or recovery hit a guardrail; callers
-    should fall back to the older collect/chunk recovery path.
+    Returns (case_stats, failures, any_failed, completed, fallback_allowed).
+    A missing stepcurrent cache allows collect/chunk fallback. Exhausting the
+    total recovery budget does not, because fallback must share that budget.
     """
     start = time.time()
     stats = empty_case_stats()
@@ -709,7 +774,7 @@ def recover_with_stepcurrent_resume(
     current = read_stepcurrent_lastrun(test_dir, stepcurrent_key)
     if not current:
         log.write("===== STEPCURRENT RECOVERY UNAVAILABLE: no lastrun cache =====\n")
-        return stats, failures, False, False
+        return stats, failures, False, False, True
 
     log.write(
         f"===== STEPCURRENT RECOVERY START: {test}, initial={current}, "
@@ -718,8 +783,22 @@ def recover_with_stepcurrent_resume(
     mode = "rs"
     any_failed = False
 
-    for iteration in range(1, max_iterations + 1):
+    iteration = 0
+    while True:
+        iteration += 1
         before = read_stepcurrent_lastrun(test_dir, stepcurrent_key) or current
+        command_timeout = case_timeout if mode == "rs" and case_timeout > 0 else resume_timeout
+        try:
+            command_timeout = bounded_recovery_timeout(command_timeout, deadline)
+        except RecoveryBudgetExceeded as exc:
+            message = str(exc)
+            log.write(
+                f"===== STEPCURRENT RECOVERY BUDGET EXHAUSTED: {test}, "
+                f"iterations={iteration - 1} ({message}) =====\n"
+            )
+            write_synthetic_failed_summary(log, test, "Timeout", message)
+            failures.append((test, f"Timeout: {message}", time.time() - start))
+            return stats, failures, True, False, False
         returncode, output, timed_out = run_pytest_with_stepcurrent(
             test=test,
             test_dir=test_dir,
@@ -727,7 +806,7 @@ def recover_with_stepcurrent_resume(
             stepcurrent_key=stepcurrent_key,
             mode=mode,
             log=log,
-            timeout=timeout,
+            timeout=command_timeout,
         )
         elapsed = time.time() - start
 
@@ -741,7 +820,7 @@ def recover_with_stepcurrent_resume(
                 f"===== STEPCURRENT RECOVERY DONE: {test}, iterations={iteration}, "
                 f"failed={any_failed} =====\n"
             )
-            return stats, failures, any_failed, True
+            return stats, failures, any_failed, True, False
 
         current = read_stepcurrent_lastrun(test_dir, stepcurrent_key) or before
         if timed_out:
@@ -773,12 +852,6 @@ def recover_with_stepcurrent_resume(
         else:
             mode = "rs"
 
-    log.write(
-        f"===== STEPCURRENT RECOVERY ABORTED: hit max_iterations={max_iterations} =====\n"
-    )
-    return stats, failures, any_failed, False
-
-
 def recover_crashed_test(
     *,
     test: str,
@@ -787,9 +860,18 @@ def recover_crashed_test(
     log,
     timeout: int,
     chunk_size: int,
+    case_timeout: int,
+    max_attempts: int,
+    deadline: float | None = None,
 ) -> tuple[dict[str, int], list[tuple[str, str, float]], bool]:
     log.write(f"===== RECOVERY COLLECT: {test} =====\n")
-    nodeids = collect_test_nodeids(test_dir, test, env, timeout)
+    try:
+        collect_timeout = bounded_recovery_timeout(timeout, deadline)
+    except RecoveryBudgetExceeded as exc:
+        message = str(exc)
+        write_synthetic_failed_summary(log, test, "Timeout", message)
+        return empty_case_stats(), [(test, f"Timeout: {message}", 0.0)], True
+    nodeids = collect_test_nodeids(test_dir, test, env, collect_timeout)
     if not nodeids:
         stats = empty_case_stats()
         stats["unknown"] = 1
@@ -801,24 +883,42 @@ def recover_crashed_test(
     stats = empty_case_stats()
     failures: list[tuple[str, str, float]] = []
     any_failed = False
+    budget_exhausted = False
 
     for targets in chunked(nodeids, max(1, chunk_size)):
-        chunk_stats, chunk_failures, chunk_failed = run_recovery_targets(
-            targets=targets,
-            test_dir=test_dir,
-            env=env,
-            log=log,
-            timeout=timeout,
-            chunk_size=chunk_size,
-        )
+        try:
+            chunk_stats, chunk_failures, chunk_failed = run_recovery_targets(
+                targets=targets,
+                test_dir=test_dir,
+                env=env,
+                log=log,
+                timeout=case_timeout if case_timeout > 0 else timeout,
+                chunk_size=chunk_size,
+                deadline=deadline,
+                max_attempts=max_attempts,
+            )
+        except RecoveryBudgetExceeded as exc:
+            message = str(exc)
+            log.write(f"===== RECOVERY BUDGET EXHAUSTED: {test} ({message}) =====\n")
+            write_synthetic_failed_summary(log, test, "Timeout", message)
+            failures.append((test, f"Timeout: {message}", 0.0))
+            any_failed = True
+            budget_exhausted = True
+            break
         add_case_stats(stats, chunk_stats)
         failures.extend(chunk_failures)
         any_failed = any_failed or chunk_failed
 
-    log.write(
-        f"===== RECOVERY DONE: {test}, cases={case_total(stats)}, "
-        f"failed={any_failed} =====\n"
-    )
+    if budget_exhausted:
+        log.write(
+            f"===== RECOVERY ABORTED: {test}, cases={case_total(stats)}, "
+            "reason=recovery total time budget exhausted =====\n"
+        )
+    else:
+        log.write(
+            f"===== RECOVERY DONE: {test}, cases={case_total(stats)}, "
+            f"failed={any_failed} =====\n"
+        )
     return stats, failures, any_failed
 
 
@@ -833,6 +933,9 @@ def run_gpu_tests(
     timeout: int = 0,
     crash_recovery: bool = True,
     crash_chunk_size: int = 16,
+    recovery_case_timeout: int = 600,
+    recovery_attempts: int = 3,
+    recovery_max_total_time: int = 7200,
 ) -> dict:
     env = make_test_env()
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
@@ -897,17 +1000,31 @@ def run_gpu_tests(
                 log.write(f"===== {ts} TIMEOUT: {test} (>{timeout}s) =====\n")
                 step_nodeid = read_stepcurrent_lastrun(test_dir, stepcurrent_key) or test
                 if crash_recovery:
-                    recovered_stats, recovered_failures, recovered_failed, completed = recover_with_stepcurrent_resume(
+                    recovery_deadline = (
+                        time.monotonic() + recovery_max_total_time
+                        if recovery_max_total_time > 0
+                        else None
+                    )
+                    (
+                        recovered_stats,
+                        recovered_failures,
+                        recovered_failed,
+                        completed,
+                        fallback_allowed,
+                    ) = recover_with_stepcurrent_resume(
                         test=test,
                         test_dir=test_dir,
                         env=env,
                         log=log,
-                        timeout=timeout,
+                        resume_timeout=timeout,
+                        case_timeout=recovery_case_timeout,
                         stepcurrent_key=stepcurrent_key,
                         initial_error_type="Timeout",
                         initial_message=f"timeout (>{timeout}s)",
+                        max_failures_per_case=recovery_attempts,
+                        deadline=recovery_deadline,
                     )
-                    if not completed:
+                    if not completed and fallback_allowed:
                         recovered_stats, recovered_failures, recovered_failed = recover_crashed_test(
                             test=test,
                             test_dir=test_dir,
@@ -915,6 +1032,9 @@ def run_gpu_tests(
                             log=log,
                             timeout=timeout,
                             chunk_size=crash_chunk_size,
+                            case_timeout=recovery_case_timeout,
+                            max_attempts=recovery_attempts,
+                            deadline=recovery_deadline,
                         )
                     add_case_stats(case_stats, recovered_stats)
                     failures.extend(recovered_failures)
@@ -947,17 +1067,31 @@ def run_gpu_tests(
                 log.write(f"===== {ts} CRASH DETECTED: {test} (exit={returncode}) =====\n")
                 step_nodeid = read_stepcurrent_lastrun(test_dir, stepcurrent_key) or test
                 error_msg = crash_message(output, returncode)
-                recovered_stats, recovered_failures, recovered_failed, completed = recover_with_stepcurrent_resume(
+                recovery_deadline = (
+                    time.monotonic() + recovery_max_total_time
+                    if recovery_max_total_time > 0
+                    else None
+                )
+                (
+                    recovered_stats,
+                    recovered_failures,
+                    recovered_failed,
+                    completed,
+                    fallback_allowed,
+                ) = recover_with_stepcurrent_resume(
                     test=test,
                     test_dir=test_dir,
                     env=env,
                     log=log,
-                    timeout=timeout,
+                    resume_timeout=timeout,
+                    case_timeout=recovery_case_timeout,
                     stepcurrent_key=stepcurrent_key,
                     initial_error_type="Crash",
                     initial_message=error_msg,
+                    max_failures_per_case=recovery_attempts,
+                    deadline=recovery_deadline,
                 )
-                if not completed:
+                if not completed and fallback_allowed:
                     recovered_stats, recovered_failures, recovered_failed = recover_crashed_test(
                         test=test,
                         test_dir=test_dir,
@@ -965,6 +1099,9 @@ def run_gpu_tests(
                         log=log,
                         timeout=timeout,
                         chunk_size=crash_chunk_size,
+                        case_timeout=recovery_case_timeout,
+                        max_attempts=recovery_attempts,
+                        deadline=recovery_deadline,
                     )
                 add_case_stats(case_stats, recovered_stats)
                 failures.extend(recovered_failures)
@@ -1999,6 +2136,9 @@ def rerun_process_failure_files(
     timeout: int,
     crash_recovery: bool,
     crash_chunk_size: int,
+    recovery_case_timeout: int,
+    recovery_attempts: int,
+    recovery_max_total_time: int,
 ) -> tuple[list[dict], float, str]:
     rerun_dir = os.path.join(log_dir, "process_file_rerun")
     os.makedirs(rerun_dir, exist_ok=True)
@@ -2022,6 +2162,9 @@ def rerun_process_failure_files(
                 timeout,
                 crash_recovery,
                 crash_chunk_size,
+                recovery_case_timeout,
+                recovery_attempts,
+                recovery_max_total_time,
             ): gpu_ids[worker_idx]
             for worker_idx in range(min(len(gpu_ids), len(tests)))
         }
@@ -2039,6 +2182,9 @@ def rerun_process_failure_files(
     rerun_summary = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "timeout": timeout,
+        "recovery_case_timeout": recovery_case_timeout,
+        "recovery_attempts": recovery_attempts,
+        "recovery_max_total_time": recovery_max_total_time,
         "tests": tests,
         "results": results,
         "elapsed": round(total_elapsed, 1),
@@ -2182,6 +2328,24 @@ def main() -> None:
         default=16,
         help="initial case chunk size used during crash recovery",
     )
+    parser.add_argument(
+        "--recovery-case-timeout",
+        type=int,
+        default=600,
+        help="timeout seconds for one exact --rs case rerun; 0 reuses --timeout",
+    )
+    parser.add_argument(
+        "--recovery-attempts",
+        type=int,
+        default=3,
+        help="maximum exact reruns for one crash/timeout case before skipping it",
+    )
+    parser.add_argument(
+        "--recovery-max-total-time",
+        type=int,
+        default=7200,
+        help="total recovery seconds per failed file, including fallback; 0 means unlimited",
+    )
     parser.add_argument("--dry-run-only", action="store_true", help="only generate test_files.txt")
     parser.add_argument(
         "--analyze-only",
@@ -2222,6 +2386,13 @@ def main() -> None:
     args, unknown = parser.parse_known_args(known)
     dry_run_extra = unknown + pass_through
 
+    if args.recovery_case_timeout < 0:
+        parser.error("--recovery-case-timeout must be >= 0")
+    if args.recovery_attempts < 1:
+        parser.error("--recovery-attempts must be >= 1")
+    if args.recovery_max_total_time < 0:
+        parser.error("--recovery-max-total-time must be >= 0")
+
     try:
         gpu_ids = parse_gpu_ids(args.gpu_ids, args.num_gpus)
     except ValueError as exc:
@@ -2261,6 +2432,9 @@ def main() -> None:
     print(f"GPU IDs:      {','.join(str(x) for x in gpu_ids)}")
     print("Test env:     " + ", ".join(f"{k}={v}" for k, v in DEFAULT_TEST_ENV.items()))
     print(f"Crash recovery: {'off' if args.no_crash_recovery else 'on'}")
+    print(f"Recovery case timeout: {args.recovery_case_timeout}s")
+    print(f"Recovery attempts:     {args.recovery_attempts}")
+    print(f"Recovery total budget: {args.recovery_max_total_time}s")
     print()
 
     print("=" * 60)
@@ -2418,6 +2592,9 @@ def main() -> None:
                 args.timeout,
                 not args.no_crash_recovery,
                 args.crash_chunk_size,
+                args.recovery_case_timeout,
+                args.recovery_attempts,
+                args.recovery_max_total_time,
             ): gpu_ids[worker_idx]
             for worker_idx in range(min(len(gpu_ids), len(remaining)))
         }
@@ -2476,6 +2653,9 @@ def main() -> None:
                     timeout=process_timeout,
                     crash_recovery=not args.no_crash_recovery,
                     crash_chunk_size=args.crash_chunk_size,
+                    recovery_case_timeout=args.recovery_case_timeout,
+                    recovery_attempts=args.recovery_attempts,
+                    recovery_max_total_time=args.recovery_max_total_time,
                 )
                 final_rows = collect_failures_from_logs(log_dir)
                 final_rows = filter_stale_process_rows_after_file_rerun(
