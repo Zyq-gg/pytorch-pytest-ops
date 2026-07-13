@@ -1,0 +1,4 @@
+interface:
+  display_name: "PyTorch Pytest Operations"
+  short_description: "Run, resume, inspect, and report PyTorch tests"
+  default_prompt: "Use $pytorch-pytest-ops to inspect my PyTorch test run and give me the exact next command."
