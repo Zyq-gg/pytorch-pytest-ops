@@ -144,6 +144,9 @@ def select_process_rerun_modules(
 ) -> list[str]:
     """Select incomplete modules without relying on case-report granularity."""
     selected: set[str] = set()
+    reported_modules = {
+        test_file_to_module(row.get("test_file", "")) for row in rows if row.get("test_file")
+    }
     if not wanted_types or "Timeout" in wanted_types:
         selected.update(
             module for module in tests if progress.get(module, {}).get("status") == "TIMEOUT"
@@ -156,36 +159,50 @@ def select_process_rerun_modules(
         module = test_file_to_module(row.get("test_file", ""))
         if module in tests:
             selected.add(module)
+    if not wanted_types or "Crash" in wanted_types:
+        selected.update(
+            module
+            for module in tests
+            if progress.get(module, {}).get("status") == "FAIL"
+            and module not in reported_modules
+        )
     return [module for module in tests if module in selected]
 
 
-def append_terminal_timeout_rows(
+def append_unreported_terminal_rows(
     rows: list[dict[str, str]], tests: list[str], progress: dict[str, dict]
 ) -> list[dict[str, str]]:
-    """Ensure a final module timeout is visible as an unresolved report row."""
+    """Ensure terminal process failures are visible as unresolved report rows."""
     result = list(rows)
-    existing = {
-        test_file_to_module(row.get("test_file", ""))
-        for row in rows
-        if is_process_level_failure(row) and row.get("error_type") == "Timeout"
-    }
+    existing = {test_file_to_module(row.get("test_file", "")) for row in rows}
     for module in tests:
         item = progress.get(module, {})
-        if item.get("status") != "TIMEOUT" or module in existing:
+        status = item.get("status")
+        if status not in {"TIMEOUT", "FAIL"} or module in existing:
             continue
-        timeout_message = f"module did not reach a terminal run_test.py result ({item.get('elapsed', 0)}s)"
+        if status == "TIMEOUT":
+            case_name = "<timeout>"
+            error_type = "Timeout"
+            message = f"module did not reach a terminal run_test.py result ({item.get('elapsed', 0)}s)"
+        else:
+            case_name = "<process-failure>"
+            error_type = "ProcessFailure"
+            message = (
+                "run_test.py returned nonzero without a parsable case failure "
+                f"(rc={item.get('returncode', '')}, elapsed={item.get('elapsed', 0)}s)"
+            )
         result.append(
             {
                 "source_log": "",
                 "gpu": "",
                 "test_file": module_to_test_file(module),
                 "class_name": "",
-                "case_name": "<timeout>",
+                "case_name": case_name,
                 "case_params": "",
-                "error_type": "Timeout",
-                "error_message": timeout_message,
+                "error_type": error_type,
+                "error_message": message,
                 "nodeid": module_to_test_file(module),
-                "raw": timeout_message,
+                "raw": message,
             }
         )
     return result
@@ -748,13 +765,13 @@ def main() -> int:
             final_rows = replace_rerun_module_rows(
                 final_rows, set(process_rerun_modules), process_rerun_dir
             )
-            final_rows = append_terminal_timeout_rows(final_rows, tests, progress)
+            final_rows = append_unreported_terminal_rows(final_rows, tests, progress)
             failure_reports = generate_failure_reports_from_rows(str(log_dir), final_rows)
 
     progress = load_progress(progress_file)
     if not args.no_analyze and not process_rerun_modules:
         final_rows = collect_failures_from_logs(str(log_dir))
-        final_rows = append_terminal_timeout_rows(final_rows, tests, progress)
+        final_rows = append_unreported_terminal_rows(final_rows, tests, progress)
         failure_reports = generate_failure_reports_from_rows(str(log_dir), final_rows)
     unresolved_count = failure_reports.get("unresolved_process_failure_count", 0)
     coverage = write_module_coverage(work_dir, tests, progress, unresolved_count)

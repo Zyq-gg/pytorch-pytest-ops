@@ -36,6 +36,14 @@ class OfficialQueueCompletionTest(unittest.TestCase):
             ["inductor/test_slow"],
         )
 
+    def test_unreported_nonzero_module_is_rerun_as_possible_process_crash(self):
+        self.assertEqual(
+            QUEUE.select_process_rerun_modules(
+                ["test_import"], {"test_import": {"status": "FAIL"}}, [], {"Timeout", "Crash"}
+            ),
+            ["test_import"],
+        )
+
     def test_complete_rerun_replaces_every_old_row_for_module(self):
         with tempfile.TemporaryDirectory() as tmp:
             rerun_dir = Path(tmp) / "rerun"
@@ -89,12 +97,21 @@ class OfficialQueueCompletionTest(unittest.TestCase):
             )
 
     def test_terminal_timeout_gets_explicit_unresolved_row(self):
-        rows = QUEUE.append_terminal_timeout_rows(
+        rows = QUEUE.append_unreported_terminal_rows(
             [], ["test_slow"], {"test_slow": {"status": "TIMEOUT", "elapsed": 90}}
         )
         self.assertEqual(rows[0]["test_file"], "test_slow.py")
         self.assertEqual(rows[0]["case_name"], "<timeout>")
         self.assertEqual(rows[0]["error_type"], "Timeout")
+
+    def test_unreported_nonzero_result_gets_process_failure_row(self):
+        rows = QUEUE.append_unreported_terminal_rows(
+            [],
+            ["test_import"],
+            {"test_import": {"status": "FAIL", "elapsed": 2, "returncode": 1}},
+        )
+        self.assertEqual(rows[0]["case_name"], "<process-failure>")
+        self.assertEqual(rows[0]["error_type"], "ProcessFailure")
 
 
 if __name__ == "__main__":

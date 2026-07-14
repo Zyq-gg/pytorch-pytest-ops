@@ -1412,7 +1412,7 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
 
 官方 `run_test.py` 对普通 pytest 模块使用 `-x + --sc + --rs/--scs`：当前 case 新进程通过后继续后续 case；连续失败三次输出 `FAILED CONSISTENTLY`，并在 keep-going 模式下跳过该 case继续。队列外层使用非阻塞日志读取，timeout 时终止整个进程组并写 synthetic Timeout 行。
 
-若官方进程在导入/收集、首个 item 前崩溃，官方也可能没有 stepcurrent case。队列随后重跑整个模块；最终仍无 case 时保留 unresolved 文件级记录，不会静默删除。若完整补跑仍被设置的有限 timeout 截断，checkpoint 会继续保持 `TIMEOUT`，`coverage_complete` 为 false，并在最终 CSV/unresolved 报告中留下明确的模块级 `<timeout>` 行。
+若官方进程在导入/收集、首个 item 前崩溃，官方也可能没有 stepcurrent case。队列会把“checkpoint 为 FAIL 且该模块没有任何可解析失败行”视为疑似进程级中断并完整重跑；最终仍无 case 时保留 `<process-failure>` unresolved 文件级记录，不会静默删除。若完整补跑仍被设置的有限 timeout 截断，checkpoint 会继续保持 `TIMEOUT`，`coverage_complete` 为 false，并在最终 CSV/unresolved 报告中留下明确的模块级 `<timeout>` 行。
 
 ### 6.6 查看状态、中断续跑和结束验收
 
