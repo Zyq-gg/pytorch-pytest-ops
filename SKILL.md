@@ -1,22 +1,22 @@
 ---
 name: pytorch-pytest-ops
-description: Operate and diagnose the local PyTorch pytest infrastructure under /workspace/pytorch-pytest-ops/runners. Use when asked to generate exact dry-run, full-run, subset, distributed, resume, rerun, stable-failure, nohup, environment-variable, status-inspection, completion-validation, case-query, or failure-report commands; inspect PyTorch test result directories or processes; explain timeout/crash recovery and reports; or maintain the testing workflow documentation.
+description: Operate and diagnose PyTorch pytest and official run_test.py workflows using the runners bundled with this skill. Use for exact dry-run, full-run, subset, distributed, resume, rerun, stable-failure, nohup, environment-variable, status-inspection, completion-validation, case-query, log parsing, or failure-report commands; explain timeout/crash recovery and reports; or maintain the workflow documentation.
 ---
 
 # PyTorch Pytest Operations
 
-Use the bundled runner source as the authority and give commands that are directly runnable in the user's environment.
+Use the bundled runner source as the authority and give commands that are directly runnable in the user's environment. This skill is self-contained for orchestration and log parsing; do not depend on `/workspace/torch_test`, `check_optest_results_v2.py`, or other scripts outside this skill checkout.
 
 ## Establish Context
 
-1. Resolve the current paths. In this environment, start with:
-   - PyTorch source: `/workspace/pytorch`
-   - runners: `/workspace/pytorch-pytest-ops/runners`
-   - environment: `/home/tmp/python_and_sh/env.sh`
-   - workflow: `/workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md`
-2. Inspect the relevant bundled runner source or `--help` before composing commands. Do not rely on remembered flags when the source is available.
-3. Read only the relevant workflow section. Use `grep -n`, `sed`, or `rg` when installed.
-4. Preserve user-provided work directories, environment variables, GPU IDs, timeout values, and runner choice across resume commands.
+1. Resolve `OPS_ROOT` from the directory containing this `SKILL.md`; never assume the repository was cloned to `/workspace`. Use `$OPS_ROOT/runners`, `$OPS_ROOT/scripts`, and `$OPS_ROOT/docs` in generated commands.
+2. Discover the target-specific paths separately:
+   - `PYTORCH_ROOT`: a source tree containing `test/run_test.py`
+   - `ENV_SH`: an optional environment activation script; omit it when the environment is already active
+   - `WORK`: the user-selected result directory
+3. Inspect the relevant bundled runner source or `--help` before composing commands. Do not rely on remembered flags when the source is available.
+4. Read only the relevant workflow section. Use `grep -n`, `sed`, or `rg` when installed.
+5. Preserve user-provided work directories, environment variables, GPU IDs, timeout values, and runner choice across resume commands.
 
 Read [references/runner-selection.md](references/runner-selection.md) when choosing an entry point. Read [references/commands.md](references/commands.md) for command templates. Read [references/status-and-reports.md](references/status-and-reports.md) when inspecting a run or explaining outputs.
 
@@ -25,7 +25,7 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
 ### Give a run command
 
 1. Identify the entry point and category: ordinary pytest, pytest subset, process-level file rerun, stable case rerun, official normal queue, or official distributed queue.
-2. Include `source /home/tmp/python_and_sh/env.sh` and `mkdir -p "$WORK"`.
+2. Include `source "$ENV_SH"` only when an environment script exists, and always create `$WORK`.
 3. For a long run, use `nohup env PYTHONUNBUFFERED=1 python3 -u ... > "$WORK/runner.out" 2>&1 &` and save `$!` to `runner.pid`.
 4. For a new run, include `--fresh`. For resume, use the same work directory and semantic parameters but remove `--fresh`.
 5. Keep custom environment variables identical across dry-run, run, automatic rerun, and resume. Use a different work directory when comparing configurations.
@@ -36,7 +36,7 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
 Run the bundled read-only inspector first:
 
 ```bash
-python3 /workspace/pytorch-pytest-ops/scripts/inspect_test_run.py <work-dir>
+python3 "$OPS_ROOT/scripts/inspect_test_run.py" <work-dir>
 ```
 
 Then inspect `runner.out`, active timestamp logs, and relevant JSON only as needed. Never conclude completion from `ps` alone. If the process ran on another node, explicitly say local process inspection is not authoritative.
@@ -73,7 +73,7 @@ For `pytest-failure-files`, include `--publish-to-work-dir <original-full-work-d
 - Prefer `grep -E` fallbacks because `rg` may be unavailable in runtime containers.
 - Treat runner source as newer than bundled examples. If flags differ, follow source and mention the discrepancy.
 - When diagnosing stepcurrent recovery, account for both PyTorch 2.9 `stepcurrent/<key>` and newer `stepcurrent/<key>/lastrun` cache layouts.
-- Keep `/workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md` synchronized when changing runner behavior or durable operating procedures.
+- Keep `$OPS_ROOT/docs/PYTORCH_PYTEST_WORKFLOW.md` synchronized when changing runner behavior or durable operating procedures.
 
 ## Response Shape
 

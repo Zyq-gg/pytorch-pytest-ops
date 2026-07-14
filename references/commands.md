@@ -1,18 +1,24 @@
 # Command Templates
 
-Always inspect current `--help` before using these templates.
+Always inspect current `--help` before using these templates. Resolve these variables first:
+
+```bash
+OPS_ROOT=/path/to/cloned/pytorch-pytest-ops
+PYTORCH_ROOT=/path/to/pytorch
+ENV_SH=/path/to/environment.sh  # optional when the environment is already active
+```
 
 ## Ordinary full run
 
 ```bash
-source /home/tmp/python_and_sh/env.sh
+test -z "${ENV_SH:-}" || source "$ENV_SH"
 
 WORK=/home/tmp/torch2.13/log-final/pytest_full_nmz_new
 mkdir -p "$WORK"
 
 nohup env PYTHONUNBUFFERED=1 \
-  python3 -u /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
-  /workspace/pytorch \
+  python3 -u "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
+  "$PYTORCH_ROOT" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --work-dir "$WORK" \
   --timeout 1800 \
@@ -33,9 +39,9 @@ Resume with the same command and work directory, remove `--fresh`, and normally 
 ## Dry-run only
 
 ```bash
-source /home/tmp/python_and_sh/env.sh
-python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
-  /workspace/pytorch \
+test -z "${ENV_SH:-}" || source "$ENV_SH"
+python3 "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
+  "$PYTORCH_ROOT" \
   --work-dir "$WORK" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --dry-run-only
@@ -47,8 +53,8 @@ This creates `$WORK/test_files.txt` and does not execute tests.
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
-  /workspace/pytorch \
+  "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
+  "$PYTORCH_ROOT" \
   --work-dir "$WORK" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --include-prefix inductor/,dynamo/ \
@@ -64,8 +70,8 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py pytest-list \
-  /workspace/pytorch \
+  "$OPS_ROOT/runners/run_pytorch_subset.py" pytest-list \
+  "$PYTORCH_ROOT" \
   --test-list /path/to/test_files.txt \
   --include-prefix inductor/,dynamo/ \
   --work-dir "$WORK" \
@@ -81,8 +87,8 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py pytest-failure-files \
-  /workspace/pytorch \
+  "$OPS_ROOT/runners/run_pytorch_subset.py" pytest-failure-files \
+  "$PYTORCH_ROOT" \
   --failure-csv "$BASE/latest/unresolved_process_failures.csv" \
   --work-dir "$WORK" \
   --publish-to-work-dir "$BASE" \
@@ -101,8 +107,8 @@ For a completed supplemental run that only needs publication, reuse the same arg
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 python3 -u \
-  /workspace/pytorch-pytest-ops/runners/rerun_stable_failures.py \
-  /workspace/pytorch /path/to/failure_report.csv \
+  "$OPS_ROOT/runners/rerun_stable_failures.py" \
+  "$PYTORCH_ROOT" /path/to/failure_report.csv \
   --attempts 3 \
   --timeout 600 \
   --gpu-ids 0,1,2,3,4,5,6,7 \
@@ -114,10 +120,10 @@ Inspect current `--help` for generic CSV column filters before supplying filter 
 
 ## Official distributed resume
 
-Use the current documented command from the distributed section of `/workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md`, then verify flags against:
+Use the current documented command from the distributed section of `$OPS_ROOT/docs/PYTORCH_PYTEST_WORKFLOW.md`, then verify flags against:
 
 ```bash
-python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py run-test-resume --help
+python3 "$OPS_ROOT/runners/run_pytorch_subset.py" run-test-resume --help
 ```
 
 Keep official `run_test.py` arguments after `--`. Use the same work directory and remove the fresh/reset option on resume.

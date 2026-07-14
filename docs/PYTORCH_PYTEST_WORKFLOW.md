@@ -1,6 +1,6 @@
 # PyTorch 测试脚本使用说明
 
-本文档按当前 `/workspace/pytorch-pytest-ops/runners` 最新脚本整理，基于本容器环境。本文所说的“完整测试”由两部分组成：
+本文档按仓库 `runners/` 最新脚本整理，命令示例基于当前容器环境。仓库可以 clone 到任意目录；其他环境先设置 `OPS_ROOT=/实际/clone/路径`，并把示例中的 `/workspace/pytorch-pytest-ops` 替换为 `$OPS_ROOT`。日志解析、报告生成和状态检查所需脚本均已包含在本仓库，不依赖旧的 `/workspace/torch_test` 或 `/home/tmp/python_and_sh` 解析脚本。本文所说的“完整测试”由两部分组成：
 
 1. `run_pytorch_tests_prefix.py` 跑官方 dry-run 发现的普通 pytest 文件；该清单明确排除 JIT executor 和官方 distributed-tests。
 2. `run_pytorch_subset.py run-test-resume` 通过官方 `run_test.py` 单独补跑 distributed-tests。

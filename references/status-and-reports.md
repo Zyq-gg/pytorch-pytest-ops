@@ -3,7 +3,7 @@
 ## Read-only first pass
 
 ```bash
-python3 /workspace/pytorch-pytest-ops/scripts/inspect_test_run.py <work-dir>
+python3 "$OPS_ROOT/scripts/inspect_test_run.py" <work-dir>
 tail -100 <work-dir>/runner.out
 ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 ```
@@ -34,7 +34,7 @@ The process query only describes the current machine. If storage is shared and e
 
 No process plus no summary means interrupted or incomplete, not successful. A summary plus missing checkpoint entries is also incomplete. A nonzero unresolved count means the runner finished but failed to obtain complete case-level conclusions for those files/modules.
 
-For ordinary direct pytest, a plan/progress difference can be caused by official virtual targets that have no matching file. Verify every missing item with `test -f /workspace/pytorch/test/<item>` before classifying it as omitted.
+For ordinary direct pytest, a plan/progress difference can be caused by official virtual targets that have no matching file. Verify every missing item with `test -f "$PYTORCH_ROOT/test/<item>"` before classifying it as omitted.
 
 ## Query one case
 

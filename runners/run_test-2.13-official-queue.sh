@@ -9,14 +9,14 @@ set -eo pipefail
 # and nohup-friendly logs.
 #
 # Usage:
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh dry-run-normal
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh run-normal
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh resume-normal
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh dry-run-distributed
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh run-distributed
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh status-normal
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh status-distributed
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh rerun-incomplete-normal
+#   bash ./runners/run_test-2.13-official-queue.sh dry-run-normal
+#   bash ./runners/run_test-2.13-official-queue.sh run-normal
+#   bash ./runners/run_test-2.13-official-queue.sh resume-normal
+#   bash ./runners/run_test-2.13-official-queue.sh dry-run-distributed
+#   bash ./runners/run_test-2.13-official-queue.sh run-distributed
+#   bash ./runners/run_test-2.13-official-queue.sh status-normal
+#   bash ./runners/run_test-2.13-official-queue.sh status-distributed
+#   bash ./runners/run_test-2.13-official-queue.sh rerun-incomplete-normal
 #   FAILURE_CSV=/path/failure_report.csv bash ... run-normal-failures
 #   FAILURE_CSV=/path/failure_report.csv bash ... run-distributed-failures
 #
@@ -25,16 +25,23 @@ set -eo pipefail
 #   PYTORCH_ROOT=/path/to/pytorch \
 #   NORMAL_WORK_DIR=/path/to/output \
 #   GPU_IDS=0,1 \
-#   bash /workspace/torch_test/run_test-2.13-official-queue.sh run-normal
+#   bash ./runners/run_test-2.13-official-queue.sh run-normal
 #
 # PyTorch run_test.py adds pytest reruns by default:
 #   PYTORCH_NUM_PYTEST_RERUNS=2 -> pytest --reruns=2
 # Override example:
-#   PYTORCH_NUM_PYTEST_RERUNS=0 bash /workspace/torch_test/run_test-2.13-official-queue.sh run-normal
+#   PYTORCH_NUM_PYTEST_RERUNS=0 bash ./runners/run_test-2.13-official-queue.sh run-normal
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-ENV_SH=${ENV_SH:-/home/tmp/python_and_sh/env.sh}
+ENV_SH=${ENV_SH:-}
+if [[ -z "$ENV_SH" && -f /home/tmp/python_and_sh/env.sh ]]; then
+  ENV_SH=/home/tmp/python_and_sh/env.sh
+fi
+if [[ -n "$ENV_SH" && ! -f "$ENV_SH" ]]; then
+  echo "ERROR: ENV_SH does not exist: $ENV_SH" >&2
+  exit 2
+fi
 if [[ -n "$ENV_SH" ]]; then
   source "$ENV_SH"
 fi
