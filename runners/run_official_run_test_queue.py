@@ -550,7 +550,7 @@ def main() -> int:
         action="store_true",
         help="run one worker without overriding GPU visibility; useful for multi-GPU distributed modules",
     )
-    parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument("--timeout", type=int, default=21600)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--skip-fail", action="store_true")
     parser.add_argument("--dry-run-only", action="store_true")

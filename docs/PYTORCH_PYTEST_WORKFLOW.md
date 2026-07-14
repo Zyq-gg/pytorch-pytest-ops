@@ -1366,15 +1366,17 @@ PYTORCH_ROOT=/workspace/pytorch \
 NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=0 \
+PROCESS_RERUN_TIMEOUT=43200 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 PYTORCH_NUM_PYTEST_RERUNS=2 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-normal
 ```
 
-shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每个模块由官方入口运行。`TIMEOUT=21600` 是首次模块的 6 小时外层 watchdog，不是官方 `run_test.py` 的默认 timeout。只要 checkpoint 终态为 `TIMEOUT`，无论日志是否碰巧抽到一个当前 case，该模块都必须进入 `process_module_rerun/`。`PROCESS_RERUN_TIMEOUT=0` 表示权威完整模块补跑不再设外层墙钟上限，避免第二次截断同一个慢模块。
+shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每个模块由官方入口运行。`TIMEOUT=21600` 是首次模块的 6 小时外层 watchdog，不是官方 `run_test.py` 的默认 timeout。只要 checkpoint 终态为 `TIMEOUT`，无论日志是否碰巧抽到一个当前 case，该模块都必须进入 `process_module_rerun/`。`PROCESS_RERUN_TIMEOUT=43200` 表示权威完整模块补跑最多运行 12 小时；再次超时会明确保留为 incomplete，而不会永久阻塞队列。
 
-本地运行未传 `run_test.py --enable-timeout` 时，官方普通 Python 测试通常没有统一墙钟 timeout；该选项启用后也主要根据 timing 数据限制 slow/sharded/C++ 路径。官方通过 `--rs/--scs` 处理 case crash 后续跑，但无法保证一个永久无输出的进程自行结束。因此首次有限 watchdog 与补跑不限时是当前折中：队列先继续，最后只对问题模块等待完整终态。
+本地运行未传 `run_test.py --enable-timeout` 时，官方普通 Python 测试通常没有统一墙钟 timeout；该选项启用后也主要根据 timing 数据限制 slow/sharded/C++ 路径。官方通过 `--rs/--scs` 处理 case crash 后续跑，但无法保证一个永久无输出的进程自行结束。因此当前默认使用两级有限 watchdog：首次 6 小时，自动完整模块补跑 12 小时；两次都超时则明确报告不完整并结束任务。
+
+只有在人工确认某个模块只是特别慢而不是永久 hang 时，才对该次定向补跑显式设置 `PROCESS_RERUN_TIMEOUT=0`，表示取消外层墙钟限制。
 
 ### 6.4 输出目录和失败报告
 
@@ -1433,7 +1435,7 @@ PYTORCH_ROOT=/workspace/pytorch \
 NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=0 \
+PROCESS_RERUN_TIMEOUT=43200 \
 PYTORCH_NUM_PYTEST_RERUNS=2 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-normal
 ```
@@ -1465,7 +1467,7 @@ ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
-PROCESS_RERUN_TIMEOUT=0 \
+PROCESS_RERUN_TIMEOUT=43200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh rerun-incomplete-normal
 ```
 
@@ -1482,7 +1484,7 @@ NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_ind_dyn_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 INCLUDE_REGEX='^(inductor|dynamo)/' \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=0 \
+PROCESS_RERUN_TIMEOUT=43200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh dry-run-normal
 
 ENV_SH=/home/tmp/python_and_sh/env.sh \
@@ -1491,7 +1493,7 @@ NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_ind_dyn_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 INCLUDE_REGEX='^(inductor|dynamo)/' \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=0 \
+PROCESS_RERUN_TIMEOUT=43200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-normal
 ```
 
@@ -1508,7 +1510,7 @@ FAILURE_CSV=/home/tmp/torch2.13/run_test_official_nmz/latest/failure_report.csv 
 FAILURE_WORK_DIR=/home/tmp/torch2.13/run_test_official_failure_rerun_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=0 \
+PROCESS_RERUN_TIMEOUT=43200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-normal-failures
 ```
 
@@ -1582,14 +1584,14 @@ ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
-TIMEOUT=0 \
-PROCESS_RERUN_TIMEOUT=0 \
+TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=43200 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 PYTORCH_NUM_PYTEST_RERUNS=2 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-distributed
 ```
 
-`TIMEOUT=0` 禁用外层首次 timeout，优先让官方逻辑完成；process-level Crash 仍会进入不限时完整模块补跑。distributed 官方 pytest 本身按源码设置 `--reruns=0`，因为该类测试不支持 pytest-rerunfailures；case 继续主要依赖官方 stepcurrent/handler。
+distributed 正式无人值守运行同样采用首次 6 小时、完整模块补跑 12 小时的有限 watchdog。若补跑仍超时，最终报告会保留模块级 `<timeout>`，并将 `coverage_complete` 置为 false。distributed 官方 pytest 本身按源码设置 `--reruns=0`，因为该类测试不支持 pytest-rerunfailures；case 继续主要依赖官方 stepcurrent/handler。
 
 ### 7.3 输出、状态、续跑和结束验收
 
@@ -1611,8 +1613,8 @@ ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
-TIMEOUT=0 \
-PROCESS_RERUN_TIMEOUT=0 \
+TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=43200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-distributed
 ```
 
@@ -1625,14 +1627,14 @@ ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_c10d_nmz \
 INCLUDE_REGEX='^distributed/(test_c10d|test_store)' \
-TIMEOUT=0 \
+TIMEOUT=21600 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh dry-run-distributed
 
 ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_c10d_nmz \
 INCLUDE_REGEX='^distributed/(test_c10d|test_store)' \
-TIMEOUT=0 \
+TIMEOUT=21600 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-distributed
 ```
 
@@ -1643,8 +1645,8 @@ ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 FAILURE_CSV=/home/tmp/torch2.13/run_test_official_distributed_nmz/latest/failure_report.csv \
 FAILURE_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_failure_rerun_nmz \
-TIMEOUT=0 \
-PROCESS_RERUN_TIMEOUT=0 \
+TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=43200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-distributed-failures
 ```
 
@@ -1656,7 +1658,7 @@ bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-d
 ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_nmz \
-PROCESS_RERUN_TIMEOUT=0 \
+PROCESS_RERUN_TIMEOUT=43200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh rerun-incomplete-distributed
 ```
 

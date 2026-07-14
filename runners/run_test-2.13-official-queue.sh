@@ -43,9 +43,9 @@ PYTORCH_ROOT=${PYTORCH_ROOT:-/workspace/pytorch}
 QUEUE_RUNNER=${QUEUE_RUNNER:-$SCRIPT_DIR/run_official_run_test_queue.py}
 GPU_IDS=${GPU_IDS:-0,1,2,3,4,5,6,7}
 TIMEOUT=${TIMEOUT:-21600}
-# Full-module recovery is authoritative. Zero avoids truncating the same slow
-# module a second time; set a finite value only when a hard watchdog is required.
-PROCESS_RERUN_TIMEOUT=${PROCESS_RERUN_TIMEOUT:-0}
+# Keep unattended recovery finite. A second timeout is reported explicitly as
+# incomplete instead of leaving the queue blocked forever.
+PROCESS_RERUN_TIMEOUT=${PROCESS_RERUN_TIMEOUT:-43200}
 PROCESS_RERUN_ERROR_TYPES=${PROCESS_RERUN_ERROR_TYPES:-Timeout,Crash}
 INCLUDE_REGEX=${INCLUDE_REGEX:-}
 EXCLUDE_REGEX=${EXCLUDE_REGEX:-}
