@@ -118,21 +118,131 @@ def filter_modules(
     return selected
 
 
-def filter_stale_official_process_rows(
+def replace_rerun_module_rows(
     rows: list[dict[str, str]],
     rerun_modules: set[str],
     rerun_dir: Path,
 ) -> list[dict[str, str]]:
+    """Use a complete module rerun as the sole source for that module."""
     rerun_dir_abs = str(rerun_dir.resolve())
     filtered: list[dict[str, str]] = []
     for row in rows:
         source_log = os.path.abspath(row.get("source_log", ""))
         module = test_file_to_module(row.get("test_file", ""))
         is_from_rerun = source_log.startswith(rerun_dir_abs + os.sep)
-        if module in rerun_modules and is_process_level_failure(row) and not is_from_rerun:
+        if module in rerun_modules and not is_from_rerun:
             continue
         filtered.append(row)
     return filtered
+
+
+def select_process_rerun_modules(
+    tests: list[str],
+    progress: dict[str, dict],
+    rows: list[dict[str, str]],
+    wanted_types: set[str],
+) -> list[str]:
+    """Select incomplete modules without relying on case-report granularity."""
+    selected: set[str] = set()
+    if not wanted_types or "Timeout" in wanted_types:
+        selected.update(
+            module for module in tests if progress.get(module, {}).get("status") == "TIMEOUT"
+        )
+    for row in rows:
+        if not is_process_level_failure(row):
+            continue
+        if wanted_types and row.get("error_type", "") not in wanted_types:
+            continue
+        module = test_file_to_module(row.get("test_file", ""))
+        if module in tests:
+            selected.add(module)
+    return [module for module in tests if module in selected]
+
+
+def append_terminal_timeout_rows(
+    rows: list[dict[str, str]], tests: list[str], progress: dict[str, dict]
+) -> list[dict[str, str]]:
+    """Ensure a final module timeout is visible as an unresolved report row."""
+    result = list(rows)
+    existing = {
+        test_file_to_module(row.get("test_file", ""))
+        for row in rows
+        if is_process_level_failure(row) and row.get("error_type") == "Timeout"
+    }
+    for module in tests:
+        item = progress.get(module, {})
+        if item.get("status") != "TIMEOUT" or module in existing:
+            continue
+        timeout_message = f"module did not reach a terminal run_test.py result ({item.get('elapsed', 0)}s)"
+        result.append(
+            {
+                "source_log": "",
+                "gpu": "",
+                "test_file": module_to_test_file(module),
+                "class_name": "",
+                "case_name": "<timeout>",
+                "case_params": "",
+                "error_type": "Timeout",
+                "error_message": timeout_message,
+                "nodeid": module_to_test_file(module),
+                "raw": timeout_message,
+            }
+        )
+    return result
+
+
+def write_module_coverage(
+    work_dir: Path,
+    tests: list[str],
+    progress: dict[str, dict],
+    unresolved_count: int,
+) -> dict:
+    rows: list[dict[str, object]] = []
+    missing: list[str] = []
+    timeout_modules: list[str] = []
+    for module in tests:
+        item = progress.get(module)
+        status = item.get("status", "MISSING") if item else "MISSING"
+        if status not in {"PASS", "FAIL", "TIMEOUT"}:
+            missing.append(module)
+        if status == "TIMEOUT":
+            timeout_modules.append(module)
+        rows.append(
+            {
+                "module": module,
+                "status": status,
+                "elapsed": item.get("elapsed", "") if item else "",
+                "returncode": item.get("returncode", "") if item else "",
+                "time": item.get("time", "") if item else "",
+            }
+        )
+    csv_path = work_dir / "module_status.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["module", "status", "elapsed", "returncode", "time"])
+        writer.writeheader()
+        writer.writerows(rows)
+    incomplete = missing + timeout_modules
+    (work_dir / "incomplete_modules.txt").write_text(
+        "\n".join(incomplete) + ("\n" if incomplete else ""), encoding="utf-8"
+    )
+    coverage = {
+        "planned": len(tests),
+        "terminal": sum(1 for row in rows if row["status"] in {"PASS", "FAIL"}),
+        "pass": sum(1 for row in rows if row["status"] == "PASS"),
+        "fail": sum(1 for row in rows if row["status"] == "FAIL"),
+        "timeout": len(timeout_modules),
+        "missing": len(missing),
+        "unresolved_process_failures": unresolved_count,
+        "coverage_complete": not incomplete and unresolved_count == 0,
+        "missing_modules": missing,
+        "timeout_modules": timeout_modules,
+        "module_status_csv": str(csv_path),
+        "incomplete_modules_file": str(work_dir / "incomplete_modules.txt"),
+    }
+    (work_dir / "coverage_report.json").write_text(
+        json.dumps(coverage, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return coverage
 
 
 def parse_gpu_ids(raw: str) -> list[int]:
@@ -446,6 +556,11 @@ def main() -> int:
     parser.add_argument("--no-process-rerun", dest="process_rerun", action="store_false")
     parser.add_argument("--process-rerun-error-types", default="Timeout,Crash")
     parser.add_argument("--process-rerun-timeout", type=int, default=43200)
+    parser.add_argument(
+        "--process-rerun-only",
+        action="store_true",
+        help="rerun incomplete modules in an existing work directory and rebuild its reports",
+    )
     parser.add_argument("--allow-fail", action="store_true", help="exit 0 even if modules fail")
     parser.set_defaults(process_rerun=True)
     args, run_test_args = parser.parse_known_args()
@@ -461,7 +576,18 @@ def main() -> int:
         raise SystemExit(f"test dir does not exist: {test_dir}")
 
     raw_dry_run = ""
-    if args.failure_csv:
+    existing_test_list = work_dir / "run_test_tests.txt"
+    if args.process_rerun_only:
+        if args.fresh:
+            raise SystemExit("--process-rerun-only cannot be combined with --fresh")
+        if not existing_test_list.is_file():
+            raise SystemExit(f"existing test list does not exist: {existing_test_list}")
+        tests = [
+            line.strip()
+            for line in existing_test_list.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+    elif args.failure_csv:
         failure_csv = Path(args.failure_csv).resolve()
         if not failure_csv.is_file():
             raise SystemExit(f"failure CSV does not exist: {failure_csv}")
@@ -488,7 +614,8 @@ def main() -> int:
     )
 
     test_list_file = work_dir / "run_test_tests.txt"
-    test_list_file.write_text("\n".join(tests) + ("\n" if tests else ""), encoding="utf-8")
+    if not args.process_rerun_only:
+        test_list_file.write_text("\n".join(tests) + ("\n" if tests else ""), encoding="utf-8")
 
     print(f"PyTorch root: {pytorch_root}", flush=True)
     print(f"test dir:     {test_dir}", flush=True)
@@ -535,27 +662,38 @@ def main() -> int:
         "GPU IDs:      " + ("inherited/all (single worker)" if args.no_bind_gpu else ",".join(str(x) for x in gpu_ids)),
         flush=True,
     )
-    if not remaining:
+    if not remaining and not args.process_rerun_only:
         print("All selected tests completed.", flush=True)
         return 0
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = work_dir / timestamp
-    log_dir.mkdir(parents=True, exist_ok=True)
-    write_latest(work_dir, log_dir)
+    if args.process_rerun_only:
+        latest = work_dir / "latest"
+        if latest.is_symlink() or latest.is_dir():
+            log_dir = latest.resolve()
+        elif (work_dir / "latest.txt").is_file():
+            log_dir = Path((work_dir / "latest.txt").read_text(encoding="utf-8").strip())
+        else:
+            raise SystemExit(f"existing latest result does not exist under {work_dir}")
+    else:
+        log_dir = work_dir / timestamp
+        log_dir.mkdir(parents=True, exist_ok=True)
+        write_latest(work_dir, log_dir)
     print(f"log dir:      {log_dir}", flush=True)
     print(f"progress:     {progress_file}", flush=True)
 
     start = time.time()
-    results = execute_queue(
-        tests=remaining,
-        gpu_ids=gpu_ids,
-        test_dir=test_dir,
-        log_dir=log_dir,
-        progress_file=progress_file,
-        timeout=args.timeout,
-        run_test_args=run_test_args,
-    )
+    results = []
+    if not args.process_rerun_only:
+        results = execute_queue(
+            tests=remaining,
+            gpu_ids=gpu_ids,
+            test_dir=test_dir,
+            log_dir=log_dir,
+            progress_file=progress_file,
+            timeout=args.timeout,
+            run_test_args=run_test_args,
+        )
 
     progress = load_progress(progress_file)
     failure_reports: dict = {}
@@ -568,21 +706,15 @@ def main() -> int:
     if args.process_rerun and not args.no_analyze:
         initial_rows = collect_failures_from_logs(str(log_dir))
         wanted_types = parse_csv_items(args.process_rerun_error_types)
-        seen_modules: set[str] = set()
-        for row in initial_rows:
-            if not is_process_level_failure(row):
-                continue
-            if wanted_types and row.get("error_type", "") not in wanted_types:
-                continue
-            test_file = row.get("test_file", "")
-            if not test_file:
-                continue
-            module = test_file_to_module(test_file)
-            if module in tests and module not in seen_modules:
-                process_rerun_modules.append(module)
-                seen_modules.add(module)
+        progress = load_progress(progress_file)
+        process_rerun_modules = select_process_rerun_modules(
+            tests, progress, initial_rows, wanted_types
+        )
         if process_rerun_modules:
-            process_rerun_dir = log_dir / "process_module_rerun"
+            process_rerun_name = "process_module_rerun"
+            if args.process_rerun_only and (log_dir / process_rerun_name).exists():
+                process_rerun_name += "_" + timestamp
+            process_rerun_dir = log_dir / process_rerun_name
             process_rerun_dir.mkdir(parents=True, exist_ok=True)
             (process_rerun_dir / "run_test_tests.txt").write_text(
                 "\n".join(process_rerun_modules) + "\n", encoding="utf-8"
@@ -611,11 +743,21 @@ def main() -> int:
                 ),
                 encoding="utf-8",
             )
+            progress = load_progress(progress_file)
             final_rows = collect_failures_from_logs(str(log_dir))
-            final_rows = filter_stale_official_process_rows(
+            final_rows = replace_rerun_module_rows(
                 final_rows, set(process_rerun_modules), process_rerun_dir
             )
+            final_rows = append_terminal_timeout_rows(final_rows, tests, progress)
             failure_reports = generate_failure_reports_from_rows(str(log_dir), final_rows)
+
+    progress = load_progress(progress_file)
+    if not args.no_analyze and not process_rerun_modules:
+        final_rows = collect_failures_from_logs(str(log_dir))
+        final_rows = append_terminal_timeout_rows(final_rows, tests, progress)
+        failure_reports = generate_failure_reports_from_rows(str(log_dir), final_rows)
+    unresolved_count = failure_reports.get("unresolved_process_failure_count", 0)
+    coverage = write_module_coverage(work_dir, tests, progress, unresolved_count)
 
     summary = {
         "pytorch_root": str(pytorch_root),
@@ -631,6 +773,8 @@ def main() -> int:
         "process_rerun_results": process_rerun_results,
         "process_rerun_dir": str(process_rerun_dir) if process_rerun_dir else "",
         "failure_reports": failure_reports,
+        "coverage": coverage,
+        "coverage_complete": coverage["coverage_complete"],
         "progress_stats": {
             "total_selected": len(tests),
             "completed_records": len(progress),
@@ -642,6 +786,7 @@ def main() -> int:
     (work_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print("summary:", work_dir / "summary.json", flush=True)
     print(json.dumps(summary["progress_stats"], indent=2), flush=True)
+    print("coverage:", json.dumps(coverage, indent=2), flush=True)
     has_failures = summary["progress_stats"]["fail"] > 0 or summary["progress_stats"]["timeout"] > 0
     return 0 if args.allow_fail or not has_failures else 1
 

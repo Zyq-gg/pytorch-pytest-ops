@@ -64,7 +64,13 @@ def process_lines(work_dir: Path) -> tuple[list[str], list[str]]:
         return [], []
     needle = str(work_dir)
     work_dir_arg = re.compile(rf"(?<!\S){re.escape(needle)}(?!\S)")
-    names = ("run_pytorch_tests_prefix.py", "run_pytorch_subset.py", "rerun_stable_failures.py", "run_test_official")
+    names = (
+        "run_pytorch_tests_prefix.py",
+        "run_pytorch_subset.py",
+        "rerun_stable_failures.py",
+        "run_official_run_test_queue.py",
+        "run_test_official",
+    )
     all_runners = [
         line
         for line in output.splitlines()
@@ -111,7 +117,9 @@ def inspect(work_dir: Path) -> dict[str, Any]:
     report = read_failure_counts(latest / "failure_report.csv")
     unresolved = read_failure_counts(latest / "unresolved_process_failures.csv")
     reports = summary.get("failure_reports", {}) if summary else {}
+    coverage = load_json(work_dir / "coverage_report.json")
     nested_rerun = latest / "process_file_rerun"
+    official_reruns = sorted(latest.glob("process_module_rerun*")) if latest.exists() else []
 
     workdir_processes, all_runner_processes = process_lines(work_dir)
     return {
@@ -129,10 +137,15 @@ def inspect(work_dir: Path) -> dict[str, Any]:
         "latest": latest_target,
         "summary_exists": summary is not None,
         "summary_unresolved": reports.get("unresolved_process_failure_count"),
+        "coverage": coverage,
         "failure_report": report,
         "unresolved_report": unresolved,
         "process_rerun_exists": nested_rerun.is_dir(),
         "process_rerun_summary_exists": (nested_rerun / "summary.json").is_file(),
+        "official_process_reruns": [str(path) for path in official_reruns],
+        "official_process_rerun_summaries": sum(
+            (path / "summary.json").is_file() for path in official_reruns
+        ),
         "local_workdir_processes": workdir_processes,
         "local_all_test_runner_processes": all_runner_processes,
     }
@@ -152,6 +165,14 @@ def print_text(data: dict[str, Any]) -> None:
     print(f"Latest:               {data['latest']}")
     print(f"Summary exists:       {data['summary_exists']}")
     print(f"Summary unresolved:   {data['summary_unresolved']}")
+    coverage = data["coverage"]
+    if coverage:
+        print(
+            "Coverage:             "
+            f"complete={coverage.get('coverage_complete')} planned={coverage.get('planned')} "
+            f"terminal={coverage.get('terminal')} timeout={coverage.get('timeout')} "
+            f"missing={coverage.get('missing')}"
+        )
     report = data["failure_report"]
     print(
         "Failure report:        "
@@ -166,6 +187,11 @@ def print_text(data: dict[str, Any]) -> None:
     print(
         "Process file rerun:    "
         f"exists={data['process_rerun_exists']} summary={data['process_rerun_summary_exists']}"
+    )
+    print(
+        "Official module rerun: "
+        f"runs={len(data['official_process_reruns'])} "
+        f"summaries={data['official_process_rerun_summaries']}"
     )
     processes = data["local_workdir_processes"]
     print(f"Local work-dir procs: {len(processes)}")

@@ -1338,7 +1338,9 @@ python3 run_test.py --include <module> --exclude-jit-executor --exclude-distribu
 
 与第 2 节直接 pytest 相比，它保留官方 custom handler、模块参数、`-x`、pytest reruns、stepcurrent `--rs/--scs` 和 `--continue-through-error`。因此 `doctests`、autoload、cpp extension AOT 等没有同名 `.py` 文件的目标也能运行。normal 模式仍明确排除 distributed 和 JIT executor；完整类别覆盖还要执行第 7 节 distributed。
 
-新增队列能力包括：正则子集、从失败 CSV 选择模块、文件级 timeout/crash 大 timeout 自动补跑、checkpoint、最终 case CSV、unresolved 独立报告，以及 official 模式稳定失败重测。
+新增队列能力包括：正则子集、从失败 CSV 选择模块、文件级 timeout/crash 完整模块自动补跑、checkpoint、最终 case CSV、unresolved 独立报告、计划清单覆盖对账，以及 official 模式稳定失败重测。
+
+旧的 `check_optest_results_v2.py` 通过扫描日志把模块分成 `ok/error/check/interrupted`，仍可能受日志格式和截断位置影响。当前队列用 `run_test_tests.txt` 与 `.run_test_progress.json` 逐项对账，并生成 `module_status.csv`、`coverage_report.json` 和 `incomplete_modules.txt`，已把这一步自动化。
 
 ### 6.2 dry-run 只生成清单
 
@@ -1364,13 +1366,15 @@ PYTORCH_ROOT=/workspace/pytorch \
 NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=43200 \
+PROCESS_RERUN_TIMEOUT=0 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 PYTORCH_NUM_PYTEST_RERUNS=2 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-normal
 ```
 
-shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每个模块由官方入口运行。`TIMEOUT` 是首次模块外层 timeout；官方内部先处理 case 失败和 crash，外层到期才终止整个进程组。最终仍为 process-level Timeout/Crash 的模块会进入 `process_module_rerun/`，以更大的 `PROCESS_RERUN_TIMEOUT` 再跑一次。
+shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每个模块由官方入口运行。`TIMEOUT=21600` 是首次模块的 6 小时外层 watchdog，不是官方 `run_test.py` 的默认 timeout。只要 checkpoint 终态为 `TIMEOUT`，无论日志是否碰巧抽到一个当前 case，该模块都必须进入 `process_module_rerun/`。`PROCESS_RERUN_TIMEOUT=0` 表示权威完整模块补跑不再设外层墙钟上限，避免第二次截断同一个慢模块。
+
+本地运行未传 `run_test.py --enable-timeout` 时，官方普通 Python 测试通常没有统一墙钟 timeout；该选项启用后也主要根据 timing 数据限制 slow/sharded/C++ 路径。官方通过 `--rs/--scs` 处理 case crash 后续跑，但无法保证一个永久无输出的进程自行结束。因此首次有限 watchdog 与补跑不限时是当前折中：队列先继续，最后只对问题模块等待完整终态。
 
 ### 6.4 输出目录和失败报告
 
@@ -1381,6 +1385,9 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
   run_test_tests.txt
   .run_test_progress.json
   summary.json
+  module_status.csv
+  coverage_report.json
+  incomplete_modules.txt
   latest -> <timestamp>
   <timestamp>/
     run_test_gpu_*.log
@@ -1397,13 +1404,15 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
     unresolved_process_failure_files.txt
 ```
 
-最重要产物是 `latest/failure_report.csv`：汇总官方日志中能识别的所有失败 case及错误信息。自动补跑成功后，初次运行的旧 process-level 行会被替换。仍无法定位 case 的文件单独写入 `unresolved_process_failures.csv`，不能当成完整 case 结果。
+最重要产物是 `latest/failure_report.csv`：汇总官方日志中能识别的所有失败 case及错误信息。自动补跑后，补跑日志是该模块的唯一权威来源，初次截断日志中的所有旧 case/process 行都会被替换，避免部分结果混入最终 CSV。仍无法定位 case 的文件单独写入 `unresolved_process_failures.csv`，不能当成完整 case 结果。
+
+`module_status.csv` 每个计划模块一行；`coverage_report.json` 中 `coverage_complete: true` 才表示模块覆盖闭合；`incomplete_modules.txt` 列出仍为 `TIMEOUT` 或缺失 checkpoint 的模块，完整时为空。普通 `FAIL` 是已完整执行后的测试失败，属于终态，不算覆盖缺失。
 
 ### 6.5 timeout/crash 处理
 
 官方 `run_test.py` 对普通 pytest 模块使用 `-x + --sc + --rs/--scs`：当前 case 新进程通过后继续后续 case；连续失败三次输出 `FAILED CONSISTENTLY`，并在 keep-going 模式下跳过该 case继续。队列外层使用非阻塞日志读取，timeout 时终止整个进程组并写 synthetic Timeout 行。
 
-若官方进程在导入/收集、首个 item 前崩溃，官方也可能没有 stepcurrent case。队列随后用大 timeout 重跑整个模块；最终仍无 case 时保留 unresolved 文件级记录，不会静默删除。
+若官方进程在导入/收集、首个 item 前崩溃，官方也可能没有 stepcurrent case。队列随后重跑整个模块；最终仍无 case 时保留 unresolved 文件级记录，不会静默删除。若完整补跑仍被设置的有限 timeout 截断，checkpoint 会继续保持 `TIMEOUT`，`coverage_complete` 为 false，并在最终 CSV/unresolved 报告中留下明确的模块级 `<timeout>` 行。
 
 ### 6.6 查看状态、中断续跑和结束验收
 
@@ -1424,7 +1433,7 @@ PYTORCH_ROOT=/workspace/pytorch \
 NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=43200 \
+PROCESS_RERUN_TIMEOUT=0 \
 PYTORCH_NUM_PYTEST_RERUNS=2 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-normal
 ```
@@ -1447,7 +1456,20 @@ for x in missing[:20]: print('MISSING',x)
 PY
 ```
 
-正常结束要求：无相关进程；根目录和 process rerun（若触发）都有 `summary.json`；`missing modules: 0`；最终 failure/unresolved 报告存在。runner 现在有失败时返回非 0，shell 后台任务是否结束仍以 summary 和对账为准。
+正常结束要求：无相关进程；根目录和 process rerun（若触发）都有 `summary.json`；最终 failure/unresolved 报告存在；`coverage_report.json` 中 `coverage_complete` 为 `true`。runner 有普通失败时也返回非 0，所以后台任务是否完整应以 coverage 和报告为准，而不是只看退出码。
+
+已有历史目录只补跑其 TIMEOUT/Crash 模块并自动重建主报告：
+
+```bash
+ENV_SH=/home/tmp/python_and_sh/env.sh \
+PYTORCH_ROOT=/workspace/pytorch \
+NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_nmz \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+PROCESS_RERUN_TIMEOUT=0 \
+bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh rerun-incomplete-normal
+```
+
+该命令读取原目录的 `run_test_tests.txt`、checkpoint 和 `latest`，不会重跑 PASS 或普通 FAIL；完成后直接更新原 `latest/failure_report.csv`、根 `summary.json` 和 coverage 文件。无需手工合并。
 
 ### 6.7 Normal 子集测试
 
@@ -1460,7 +1482,7 @@ NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_ind_dyn_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 INCLUDE_REGEX='^(inductor|dynamo)/' \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=43200 \
+PROCESS_RERUN_TIMEOUT=0 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh dry-run-normal
 
 ENV_SH=/home/tmp/python_and_sh/env.sh \
@@ -1469,7 +1491,7 @@ NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_ind_dyn_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 INCLUDE_REGEX='^(inductor|dynamo)/' \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=43200 \
+PROCESS_RERUN_TIMEOUT=0 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-normal
 ```
 
@@ -1486,7 +1508,7 @@ FAILURE_CSV=/home/tmp/torch2.13/run_test_official_nmz/latest/failure_report.csv 
 FAILURE_WORK_DIR=/home/tmp/torch2.13/run_test_official_failure_rerun_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=43200 \
+PROCESS_RERUN_TIMEOUT=0 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-normal-failures
 ```
 
@@ -1561,13 +1583,13 @@ PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=0 \
-PROCESS_RERUN_TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=0 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 PYTORCH_NUM_PYTEST_RERUNS=2 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-distributed
 ```
 
-`TIMEOUT=0` 禁用外层首次 timeout，优先让官方逻辑完成；process-level 异常仍会进入 21600 秒模块补跑。distributed 官方 pytest 本身按源码设置 `--reruns=0`，因为该类测试不支持 pytest-rerunfailures；case 继续主要依赖官方 stepcurrent/handler。
+`TIMEOUT=0` 禁用外层首次 timeout，优先让官方逻辑完成；process-level Crash 仍会进入不限时完整模块补跑。distributed 官方 pytest 本身按源码设置 `--reruns=0`，因为该类测试不支持 pytest-rerunfailures；case 继续主要依赖官方 stepcurrent/handler。
 
 ### 7.3 输出、状态、续跑和结束验收
 
@@ -1590,7 +1612,7 @@ PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
 TIMEOUT=0 \
-PROCESS_RERUN_TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=0 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-distributed
 ```
 
@@ -1622,11 +1644,21 @@ PYTORCH_ROOT=/workspace/pytorch \
 FAILURE_CSV=/home/tmp/torch2.13/run_test_official_distributed_nmz/latest/failure_report.csv \
 FAILURE_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_failure_rerun_nmz \
 TIMEOUT=0 \
-PROCESS_RERUN_TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=0 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-distributed-failures
 ```
 
 续跑使用 `resume-distributed-failures`。该模式仍是单 worker、继承全部 GPU。
+
+已有 distributed 历史目录只补跑不完整模块并重建原报告：
+
+```bash
+ENV_SH=/home/tmp/python_and_sh/env.sh \
+PYTORCH_ROOT=/workspace/pytorch \
+DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_nmz \
+PROCESS_RERUN_TIMEOUT=0 \
+bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh rerun-incomplete-distributed
+```
 
 ### 7.6 Distributed 稳定失败重测和 case 查询
 

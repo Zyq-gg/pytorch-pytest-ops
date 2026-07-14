@@ -16,6 +16,7 @@ set -eo pipefail
 #   bash /workspace/torch_test/run_test-2.13-official-queue.sh run-distributed
 #   bash /workspace/torch_test/run_test-2.13-official-queue.sh status-normal
 #   bash /workspace/torch_test/run_test-2.13-official-queue.sh status-distributed
+#   bash /workspace/torch_test/run_test-2.13-official-queue.sh rerun-incomplete-normal
 #   FAILURE_CSV=/path/failure_report.csv bash ... run-normal-failures
 #   FAILURE_CSV=/path/failure_report.csv bash ... run-distributed-failures
 #
@@ -41,8 +42,10 @@ fi
 PYTORCH_ROOT=${PYTORCH_ROOT:-/workspace/pytorch}
 QUEUE_RUNNER=${QUEUE_RUNNER:-$SCRIPT_DIR/run_official_run_test_queue.py}
 GPU_IDS=${GPU_IDS:-0,1,2,3,4,5,6,7}
-TIMEOUT=${TIMEOUT:-3600}
-PROCESS_RERUN_TIMEOUT=${PROCESS_RERUN_TIMEOUT:-43200}
+TIMEOUT=${TIMEOUT:-21600}
+# Full-module recovery is authoritative. Zero avoids truncating the same slow
+# module a second time; set a finite value only when a hard watchdog is required.
+PROCESS_RERUN_TIMEOUT=${PROCESS_RERUN_TIMEOUT:-0}
 PROCESS_RERUN_ERROR_TYPES=${PROCESS_RERUN_ERROR_TYPES:-Timeout,Crash}
 INCLUDE_REGEX=${INCLUDE_REGEX:-}
 EXCLUDE_REGEX=${EXCLUDE_REGEX:-}
@@ -121,6 +124,19 @@ case "$cmd" in
     echo "runner: $NORMAL_WORK_DIR/runner_resume.out"
     ;;
 
+  rerun-incomplete-normal)
+    mkdir -p "$NORMAL_WORK_DIR"
+    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+      --work-dir "$NORMAL_WORK_DIR" \
+      --gpu-ids "$GPU_IDS" \
+      --process-rerun-only \
+      "${PROCESS_RERUN_ARGS[@]}" \
+      -- "${COMMON_RUN_TEST_ARGS[@]}" \
+      > "$NORMAL_WORK_DIR/runner_incomplete_rerun.out" 2>&1 &
+    echo "started pid=$!"
+    echo "runner: $NORMAL_WORK_DIR/runner_incomplete_rerun.out"
+    ;;
+
   dry-run-distributed)
     mkdir -p "$DIST_WORK_DIR"
     python3 "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
@@ -161,6 +177,20 @@ case "$cmd" in
       > "$DIST_WORK_DIR/runner_resume.out" 2>&1 &
     echo "started pid=$!"
     echo "runner: $DIST_WORK_DIR/runner_resume.out"
+    ;;
+
+  rerun-incomplete-distributed)
+    mkdir -p "$DIST_WORK_DIR"
+    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+      --work-dir "$DIST_WORK_DIR" \
+      --gpu-ids "$GPU_IDS" \
+      --no-bind-gpu \
+      --process-rerun-only \
+      "${PROCESS_RERUN_ARGS[@]}" \
+      -- "${DIST_RUN_TEST_ARGS[@]}" \
+      > "$DIST_WORK_DIR/runner_incomplete_rerun.out" 2>&1 &
+    echo "started pid=$!"
+    echo "runner: $DIST_WORK_DIR/runner_incomplete_rerun.out"
     ;;
 
   run-normal-failures)
@@ -260,6 +290,9 @@ else:
     d=json.load(open(p))
     print(json.dumps(d.get("stats", {}), indent=2))
 PY
+    echo
+    echo "coverage:"
+    cat "$NORMAL_WORK_DIR/coverage_report.json" 2>/dev/null || true
     ;;
 
   status-distributed)
@@ -279,6 +312,9 @@ else:
     d=json.load(open(p))
     print(json.dumps(d.get("stats", {}), indent=2))
 PY
+    echo
+    echo "coverage:"
+    cat "$DIST_WORK_DIR/coverage_report.json" 2>/dev/null || true
     ;;
 
   *)

@@ -48,6 +48,7 @@ Require all applicable conditions:
 - The planned list is nonempty.
 - Every real planned file/module has a terminal checkpoint.
 - The root `summary.json` exists.
+- For official queue runs, `coverage_report.json.coverage_complete` is `true`.
 - The final `latest/failure_report.csv` exists.
 - `summary.json.failure_reports.unresolved_process_failure_count` is `0` and the unresolved CSV has no data rows.
 - Any automatic `process_file_rerun/` that was triggered has its own `summary.json`.
