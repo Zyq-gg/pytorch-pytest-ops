@@ -2032,19 +2032,27 @@ def update_current_summary_reports(log_dir: str, reports: dict[str, str | int]) 
         return False
 
 
-def generate_failure_reports_from_rows(log_dir: str, rows: list[dict[str, str]]) -> dict[str, str | int]:
+def generate_failure_reports_from_rows(
+    log_dir: str,
+    rows: list[dict[str, str]],
+    *,
+    include_process_rows_in_main: bool = True,
+) -> dict[str, str | int]:
     csv_file = os.path.join(log_dir, "failure_report.csv")
     json_file = os.path.join(log_dir, "failure_report.json")
     md_file = os.path.join(log_dir, "failure_report.md")
     unresolved_rows = [row for row in rows if is_process_level_failure(row)]
+    main_rows = rows if include_process_rows_in_main else [
+        row for row in rows if not is_process_level_failure(row)
+    ]
     unresolved_csv = os.path.join(log_dir, "unresolved_process_failures.csv")
     unresolved_json = os.path.join(log_dir, "unresolved_process_failures.json")
     unresolved_md = os.path.join(log_dir, "unresolved_process_failures.md")
     unresolved_files = os.path.join(log_dir, "unresolved_process_failure_files.txt")
 
-    write_failure_csv(rows, csv_file)
-    write_failure_json(rows, json_file)
-    write_failure_markdown(rows, md_file)
+    write_failure_csv(main_rows, csv_file)
+    write_failure_json(main_rows, json_file)
+    write_failure_markdown(main_rows, md_file)
     write_failure_csv(unresolved_rows, unresolved_csv)
     write_failure_json(unresolved_rows, unresolved_json)
     write_failure_markdown(unresolved_rows, unresolved_md)
@@ -2056,7 +2064,7 @@ def generate_failure_reports_from_rows(log_dir: str, rows: list[dict[str, str]])
                 f.write(test_file + "\n")
                 seen.add(test_file)
 
-    print_failure_summary(rows)
+    print_failure_summary(main_rows)
     print(f"\nFailure CSV:      {csv_file}")
     print(f"Failure JSON:     {json_file}")
     print(f"Failure Markdown: {md_file}")
@@ -2065,7 +2073,7 @@ def generate_failure_reports_from_rows(log_dir: str, rows: list[dict[str, str]])
     print(f"Unresolved files: {unresolved_files}")
 
     return {
-        "failure_count": len(rows),
+        "failure_count": len(main_rows),
         "failure_csv": csv_file,
         "failure_json": json_file,
         "failure_markdown": md_file,

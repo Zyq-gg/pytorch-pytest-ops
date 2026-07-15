@@ -173,6 +173,12 @@ def print_text(data: dict[str, Any]) -> None:
             f"terminal={coverage.get('terminal')} timeout={coverage.get('timeout')} "
             f"missing={coverage.get('missing')}"
         )
+        for item in coverage.get("timeout_details", [])[:20]:
+            print(
+                "  TIMEOUT "
+                f"{item.get('module')} kind={item.get('timeout_kind') or 'unknown'} "
+                f"elapsed={item.get('elapsed')}s attempts={item.get('attempts')}"
+            )
     report = data["failure_report"]
     print(
         "Failure report:        "

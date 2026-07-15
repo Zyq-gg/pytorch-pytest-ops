@@ -29,7 +29,8 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
 3. For a long run, use `nohup env PYTHONUNBUFFERED=1 python3 -u ... > "$WORK/runner.out" 2>&1 &` and save `$!` to `runner.pid`.
 4. For a new run, include `--fresh`. For resume, use the same work directory and semantic parameters but remove `--fresh`.
 5. Keep custom environment variables identical across dry-run, run, automatic rerun, and resume. Use a different work directory when comparing configurations.
-6. After every run command, provide output paths, status commands, resume behavior, and completion checks.
+6. For the official queue, preserve both hard and idle timeout settings. The current shell defaults are 72 hours hard and 2 hours without subprocess output for initial and process-rerun modules.
+7. After every run command, provide output paths, status commands, resume behavior, and completion checks.
 
 ### Inspect a directory
 
@@ -56,6 +57,8 @@ Require all applicable conditions:
 
 Treat a concrete `file.py::Class::case` with `error_type=Crash` or `Timeout` as a located case failure, not process-level unresolved. Do not delete it merely to make error-type counts zero.
 
+For the complete official queue, `failure_report.csv` contains only concrete case nodeids. Read module-level timeout/missing/process failures from `module_status.csv`, `coverage_report.json`, `incomplete_modules.txt`, and `unresolved_process_failures.csv` instead.
+
 ### Diagnose count mismatches
 
 Compare the plan with `progress["tests"]`, not the top-level JSON key count. Ordinary direct-pytest dry-run currently includes five official virtual/custom-handler targets without matching `.py` files; they are intentionally absent from the direct file checkpoint unless the local source has changed. Verify names from current files before explaining.
@@ -73,6 +76,7 @@ For `pytest-failure-files`, include `--publish-to-work-dir <original-full-work-d
 - Prefer `grep -E` fallbacks because `rg` may be unavailable in runtime containers.
 - Treat runner source as newer than bundled examples. If flags differ, follow source and mention the discrepancy.
 - When diagnosing stepcurrent recovery, account for both PyTorch 2.9 `stepcurrent/<key>` and newer `stepcurrent/<key>/lastrun` cache layouts.
+- An outer official-queue timeout kills the whole `run_test.py` invocation. A later incomplete-module rerun starts that module again; it does not reliably continue every randomly keyed official shard from the prior percentage.
 - Keep `$OPS_ROOT/docs/PYTORCH_PYTEST_WORKFLOW.md` synchronized when changing runner behavior or durable operating procedures.
 
 ## Response Shape

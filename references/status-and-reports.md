@@ -25,14 +25,14 @@ The process query only describes the current machine. If storage is shared and e
 ## Official queue outputs
 
 - `run_test_tests.txt`: official queue module plan (`run_test_modules.txt` is used by the lightweight `run-test-resume` entry).
-- `.run_test_progress.json`: module checkpoint; TIMEOUT is recorded but does not count as coverage terminal.
+- `.run_test_progress.json`: module checkpoint; records latest elapsed/timeout kind plus per-attempt history. TIMEOUT is recorded but does not count as coverage terminal.
 - `<timestamp>/run_test_gpu_*.log`: normal combined worker logs; distributed uses `run_test_gpu_all.log`.
 - `<timestamp>/process_module_rerun*/`: authoritative complete-module rerun logs and summary.
-- `latest/failure_report.csv`: parsed case failures. A timed-out module with partial case rows may not have an extra module-level Timeout row.
+- `latest/failure_report.csv`: parsed failures with concrete case nodeids only.
 - `latest/unresolved_process_failures.csv`: nonzero modules without a reliable case nodeid.
-- `module_status.csv`: one row per plan module with status, elapsed, return code, and timestamp. `PASS` and `FAIL` are terminal official returns; `TIMEOUT` was killed by the outer watchdog; `MISSING` has no checkpoint.
+- `module_status.csv`: one row per plan module with status, elapsed, return code, attempts, timeout kind/limits, and timestamp. `PASS` and `FAIL` are terminal official returns; `TIMEOUT` was killed by the outer watchdog; `MISSING` has no checkpoint.
 - `incomplete_modules.txt`: missing and TIMEOUT modules.
-- `coverage_report.json`: authoritative official completion result; `terminal` counts only `PASS + FAIL`, and completion requires zero timeout, missing, and unresolved rows plus `coverage_complete: true`.
+- `coverage_report.json`: authoritative official completion result; `terminal` counts only `PASS + FAIL`, `timeout_details` records idle/hard diagnostics, and completion requires zero timeout, missing, and unresolved rows plus `coverage_complete: true`.
 - `summary.json`: report, rerun, progress, and coverage index.
 
 ## Completion interpretation

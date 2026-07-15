@@ -217,6 +217,7 @@ def write_module_coverage(
     rows: list[dict[str, object]] = []
     missing: list[str] = []
     timeout_modules: list[str] = []
+    timeout_details: list[dict[str, object]] = []
     for module in tests:
         item = progress.get(module)
         status = item.get("status", "MISSING") if item else "MISSING"
@@ -224,6 +225,16 @@ def write_module_coverage(
             missing.append(module)
         if status == "TIMEOUT":
             timeout_modules.append(module)
+            timeout_details.append(
+                {
+                    "module": module,
+                    "elapsed": item.get("elapsed", ""),
+                    "timeout_kind": item.get("timeout_kind", ""),
+                    "hard_timeout": item.get("hard_timeout", ""),
+                    "idle_timeout": item.get("idle_timeout", ""),
+                    "attempts": item.get("attempts", ""),
+                }
+            )
         rows.append(
             {
                 "module": module,
@@ -231,11 +242,28 @@ def write_module_coverage(
                 "elapsed": item.get("elapsed", "") if item else "",
                 "returncode": item.get("returncode", "") if item else "",
                 "time": item.get("time", "") if item else "",
+                "attempts": item.get("attempts", "") if item else "",
+                "timeout_kind": item.get("timeout_kind", "") if item else "",
+                "hard_timeout": item.get("hard_timeout", "") if item else "",
+                "idle_timeout": item.get("idle_timeout", "") if item else "",
             }
         )
     csv_path = work_dir / "module_status.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["module", "status", "elapsed", "returncode", "time"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "module",
+                "status",
+                "elapsed",
+                "returncode",
+                "time",
+                "attempts",
+                "timeout_kind",
+                "hard_timeout",
+                "idle_timeout",
+            ],
+        )
         writer.writeheader()
         writer.writerows(rows)
     incomplete = missing + timeout_modules
@@ -253,6 +281,7 @@ def write_module_coverage(
         "coverage_complete": not incomplete and unresolved_count == 0,
         "missing_modules": missing,
         "timeout_modules": timeout_modules,
+        "timeout_details": timeout_details,
         "module_status_csv": str(csv_path),
         "incomplete_modules_file": str(work_dir / "incomplete_modules.txt"),
     }
@@ -360,7 +389,17 @@ def load_progress(path: Path) -> dict[str, dict]:
     return data.get("tests", {}) if isinstance(data, dict) else {}
 
 
-def save_progress(path: Path, test_name: str, status: str, elapsed: float, returncode: int | None) -> None:
+def save_progress(
+    path: Path,
+    test_name: str,
+    status: str,
+    elapsed: float,
+    returncode: int | None,
+    *,
+    timeout_kind: str = "",
+    hard_timeout: int = 0,
+    idle_timeout: int = 0,
+) -> None:
     with _progress_lock:
         data = {}
         if path.exists():
@@ -369,12 +408,34 @@ def save_progress(path: Path, test_name: str, status: str, elapsed: float, retur
             except json.JSONDecodeError:
                 data = {}
         tests = data.setdefault("tests", {})
-        tests[test_name] = {
+        previous = tests.get(test_name, {})
+        history = list(previous.get("history", [])) if isinstance(previous, dict) else []
+        if previous and not history:
+            history.append(
+                {
+                    key: previous.get(key, "")
+                    for key in (
+                        "status",
+                        "elapsed",
+                        "returncode",
+                        "time",
+                        "timeout_kind",
+                        "hard_timeout",
+                        "idle_timeout",
+                    )
+                }
+            )
+        attempt = {
             "status": status,
             "elapsed": round(elapsed, 1),
             "returncode": returncode,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timeout_kind": timeout_kind,
+            "hard_timeout": hard_timeout,
+            "idle_timeout": idle_timeout,
         }
+        history.append(dict(attempt))
+        tests[test_name] = {**attempt, "attempts": len(history), "history": history}
         stats = {
             "total": len(tests),
             "passed": sum(1 for v in tests.values() if v.get("status") == "PASS"),
@@ -389,6 +450,39 @@ def save_progress(path: Path, test_name: str, status: str, elapsed: float, retur
         tmp.replace(path)
 
 
+def timeout_kind(
+    *,
+    now: float,
+    started_at: float,
+    last_output_at: float,
+    hard_timeout: int,
+    idle_timeout: int,
+) -> str:
+    if hard_timeout > 0 and now - started_at >= hard_timeout:
+        return "hard"
+    if idle_timeout > 0 and now - last_output_at >= idle_timeout:
+        return "idle"
+    return ""
+
+
+def sort_modules_by_history(tests: list[str], progress: dict[str, dict]) -> list[str]:
+    """Start historically slow modules first while preserving ties."""
+    def elapsed(test: str) -> float:
+        try:
+            return float(progress.get(test, {}).get("elapsed", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    indexed = list(enumerate(tests))
+    indexed.sort(
+        key=lambda item: (
+            -elapsed(item[1]),
+            item[0],
+        )
+    )
+    return [test for _, test in indexed]
+
+
 def run_one(
     *,
     worker_idx: int,
@@ -398,7 +492,8 @@ def run_one(
     test_dir: Path,
     log_dir: Path,
     progress_file: Path,
-    timeout: int,
+    hard_timeout: int,
+    idle_timeout: int,
     run_test_args: list[str],
 ) -> dict:
     passed = failed = timed_out = 0
@@ -422,6 +517,7 @@ def run_one(
             log.write(f"===== command: {' '.join(cmd)} =====\n")
             returncode: int | None = None
             status = "FAIL"
+            timed_out_by = ""
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(test_dir),
@@ -436,9 +532,20 @@ def run_one(
                 assert proc.stdout is not None
                 fd = proc.stdout.fileno()
                 os.set_blocking(fd, False)
-                deadline = time.time() + timeout if timeout > 0 else None
+                last_output_at = start
                 while True:
-                    if deadline is not None and time.time() > deadline:
+                    now = time.time()
+                    timed_out_by = timeout_kind(
+                        now=now,
+                        started_at=start,
+                        last_output_at=last_output_at,
+                        hard_timeout=hard_timeout,
+                        idle_timeout=idle_timeout,
+                    )
+                    if timed_out_by:
+                        if proc.poll() is not None:
+                            timed_out_by = ""
+                            break
                         status = "TIMEOUT"
                         os.killpg(proc.pid, signal.SIGTERM)
                         try:
@@ -452,6 +559,7 @@ def run_one(
                         chunk = proc.stdout.read()
                         if chunk:
                             log.write(chunk)
+                            last_output_at = time.time()
                         elif proc.poll() is not None:
                             break
                     elif proc.poll() is not None:
@@ -471,8 +579,12 @@ def run_one(
 
             if status == "TIMEOUT":
                 test_file = module_to_test_file(test_name)
+                if timed_out_by == "idle":
+                    timeout_message = f"no process output for {idle_timeout}s"
+                else:
+                    timeout_message = f"exceeded hard timeout {hard_timeout}s"
                 log.write("=========================== short test summary info ===========================\n")
-                log.write(f"FAILED {test_file} - Timeout: exceeded {timeout}s\n")
+                log.write(f"FAILED {test_file} - Timeout: {timeout_message}\n")
                 log.write("============================== 1 failed in 0.00s ==============================\n")
 
             elapsed = time.time() - start
@@ -482,7 +594,16 @@ def run_one(
                 timed_out += 1
             else:
                 failed += 1
-            save_progress(progress_file, test_name, status, elapsed, returncode)
+            save_progress(
+                progress_file,
+                test_name,
+                status,
+                elapsed,
+                returncode,
+                timeout_kind=timed_out_by,
+                hard_timeout=hard_timeout,
+                idle_timeout=idle_timeout,
+            )
             log.write(
                 f"===== {datetime.now().strftime('%H:%M:%S')} {status}: {test_name} "
                 f"({elapsed:.1f}s, rc={returncode}) =====\n"
@@ -505,7 +626,8 @@ def execute_queue(
     test_dir: Path,
     log_dir: Path,
     progress_file: Path,
-    timeout: int,
+    hard_timeout: int,
+    idle_timeout: int,
     run_test_args: list[str],
 ) -> list[dict]:
     work_queue: queue.Queue[tuple[int, str]] = queue.Queue()
@@ -524,7 +646,8 @@ def execute_queue(
                 test_dir=test_dir,
                 log_dir=log_dir,
                 progress_file=progress_file,
-                timeout=timeout,
+                hard_timeout=hard_timeout,
+                idle_timeout=idle_timeout,
                 run_test_args=run_test_args,
             )
             for i, gpu_id in enumerate(worker_ids)
@@ -550,7 +673,18 @@ def main() -> int:
         action="store_true",
         help="run one worker without overriding GPU visibility; useful for multi-GPU distributed modules",
     )
-    parser.add_argument("--timeout", type=int, default=21600)
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=259200,
+        help="hard wall-clock timeout per official module; 0 disables it",
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=int,
+        default=7200,
+        help="terminate after this many seconds without process output; 0 disables it",
+    )
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--skip-fail", action="store_true")
     parser.add_argument("--dry-run-only", action="store_true")
@@ -572,7 +706,18 @@ def main() -> int:
     parser.add_argument("--process-rerun", dest="process_rerun", action="store_true")
     parser.add_argument("--no-process-rerun", dest="process_rerun", action="store_false")
     parser.add_argument("--process-rerun-error-types", default="Timeout,Crash")
-    parser.add_argument("--process-rerun-timeout", type=int, default=43200)
+    parser.add_argument(
+        "--process-rerun-timeout",
+        type=int,
+        default=259200,
+        help="hard wall-clock timeout for a complete-module process rerun",
+    )
+    parser.add_argument(
+        "--process-rerun-idle-timeout",
+        type=int,
+        default=7200,
+        help="no-output timeout for a complete-module process rerun",
+    )
     parser.add_argument(
         "--process-rerun-only",
         action="store_true",
@@ -581,6 +726,15 @@ def main() -> int:
     parser.add_argument("--allow-fail", action="store_true", help="exit 0 even if modules fail")
     parser.set_defaults(process_rerun=True)
     args, run_test_args = parser.parse_known_args()
+
+    for name in (
+        "timeout",
+        "idle_timeout",
+        "process_rerun_timeout",
+        "process_rerun_idle_timeout",
+    ):
+        if getattr(args, name) < 0:
+            parser.error(f"--{name.replace('_', '-')} must be >= 0")
 
     if run_test_args and run_test_args[0] == "--":
         run_test_args = run_test_args[1:]
@@ -640,6 +794,8 @@ def main() -> int:
     print(f"test list:    {test_list_file}", flush=True)
     print(f"tests:        {len(tests)}", flush=True)
     print(f"run args:     {' '.join(run_test_args)}", flush=True)
+    print(f"hard timeout: {args.timeout}s", flush=True)
+    print(f"idle timeout: {args.idle_timeout}s", flush=True)
     if args.failure_csv:
         print(f"failure CSV:  {Path(args.failure_csv).resolve()}", flush=True)
     if args.dry_run_only:
@@ -683,6 +839,8 @@ def main() -> int:
         print("All selected tests completed.", flush=True)
         return 0
 
+    remaining = sort_modules_by_history(remaining, progress)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.process_rerun_only:
         latest = work_dir / "latest"
@@ -708,7 +866,8 @@ def main() -> int:
             test_dir=test_dir,
             log_dir=log_dir,
             progress_file=progress_file,
-            timeout=args.timeout,
+            hard_timeout=args.timeout,
+            idle_timeout=args.idle_timeout,
             run_test_args=run_test_args,
         )
 
@@ -727,6 +886,7 @@ def main() -> int:
         process_rerun_modules = select_process_rerun_modules(
             tests, progress, initial_rows, wanted_types
         )
+        process_rerun_modules = sort_modules_by_history(process_rerun_modules, progress)
         if process_rerun_modules:
             process_rerun_name = "process_module_rerun"
             if args.process_rerun_only and (log_dir / process_rerun_name).exists():
@@ -738,14 +898,16 @@ def main() -> int:
             )
             print("\n===== process-level module rerun =====", flush=True)
             print(f"Modules: {len(process_rerun_modules)}", flush=True)
-            print(f"Timeout: {args.process_rerun_timeout}s", flush=True)
+            print(f"Hard timeout: {args.process_rerun_timeout}s", flush=True)
+            print(f"Idle timeout: {args.process_rerun_idle_timeout}s", flush=True)
             process_rerun_results = execute_queue(
                 tests=process_rerun_modules,
                 gpu_ids=gpu_ids,
                 test_dir=test_dir,
                 log_dir=process_rerun_dir,
                 progress_file=progress_file,
-                timeout=args.process_rerun_timeout,
+                hard_timeout=args.process_rerun_timeout,
+                idle_timeout=args.process_rerun_idle_timeout,
                 run_test_args=run_test_args,
             )
             (process_rerun_dir / "summary.json").write_text(
@@ -753,6 +915,8 @@ def main() -> int:
                     {
                         "modules": process_rerun_modules,
                         "timeout": args.process_rerun_timeout,
+                        "hard_timeout": args.process_rerun_timeout,
+                        "idle_timeout": args.process_rerun_idle_timeout,
                         "results": process_rerun_results,
                     },
                     indent=2,
@@ -766,13 +930,17 @@ def main() -> int:
                 final_rows, set(process_rerun_modules), process_rerun_dir
             )
             final_rows = append_unreported_terminal_rows(final_rows, tests, progress)
-            failure_reports = generate_failure_reports_from_rows(str(log_dir), final_rows)
+            failure_reports = generate_failure_reports_from_rows(
+                str(log_dir), final_rows, include_process_rows_in_main=False
+            )
 
     progress = load_progress(progress_file)
     if not args.no_analyze and not process_rerun_modules:
         final_rows = collect_failures_from_logs(str(log_dir))
         final_rows = append_unreported_terminal_rows(final_rows, tests, progress)
-        failure_reports = generate_failure_reports_from_rows(str(log_dir), final_rows)
+        failure_reports = generate_failure_reports_from_rows(
+            str(log_dir), final_rows, include_process_rows_in_main=False
+        )
     unresolved_count = failure_reports.get("unresolved_process_failure_count", 0)
     coverage = write_module_coverage(work_dir, tests, progress, unresolved_count)
 
@@ -784,6 +952,12 @@ def main() -> int:
         "progress_file": str(progress_file),
         "run_test_args": run_test_args,
         "gpu_ids": gpu_ids,
+        "timeouts": {
+            "hard": args.timeout,
+            "idle": args.idle_timeout,
+            "process_rerun_hard": args.process_rerun_timeout,
+            "process_rerun_idle": args.process_rerun_idle_timeout,
+        },
         "elapsed_seconds": round(time.time() - start, 1),
         "worker_results": results,
         "process_rerun_modules": process_rerun_modules,

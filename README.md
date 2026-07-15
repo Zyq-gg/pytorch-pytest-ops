@@ -129,7 +129,7 @@ python3 "$OPS_ROOT/scripts/inspect_test_run.py" \
 - `summary.json` 是否存在
 - failure 和 unresolved 报告行数
 - 自动文件补跑是否完成
-- 官方模块补跑是否完成，以及 `coverage_complete/planned/terminal/timeout/missing`
+- 官方模块补跑是否完成，以及 `coverage_complete/planned/terminal/timeout/missing` 和各 timeout 的 idle/hard 类型
 - 本机命令行中包含该 work-dir 的进程
 
 进程检查只覆盖执行脚本的当前机器。如果日志目录位于共享存储、进程实际运行在另一节点，应在对应节点检查进程，并以 checkpoint、summary 和最终报告共同判断结果。
@@ -183,13 +183,15 @@ distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `d
 
 官方 `run_test.py` 队列还会生成：
 
-- `module_status.csv`：每个计划模块的最终 `status/elapsed/returncode/time`；`TIMEOUT/MISSING` 都表示覆盖未闭合
-- `coverage_report.json`：`planned/terminal/pass/fail/timeout/missing/unresolved_process_failures` 和最终 `coverage_complete`
+- `module_status.csv`：每个计划模块的最终 `status/elapsed/returncode/time/attempts/timeout_kind`；`TIMEOUT/MISSING` 都表示覆盖未闭合
+- `coverage_report.json`：`planned/terminal/pass/fail/timeout/missing/unresolved_process_failures/timeout_details` 和最终 `coverage_complete`
 - `incomplete_modules.txt`：仍为 TIMEOUT 或缺 checkpoint 的模块清单
 
 官方队列即使命令退出并生成 `summary.json`，只要 `coverage_complete` 不是 `true`，就仍属于“运行已收尾但覆盖不完整”。
 
 其中 `terminal` 只统计真正返回的 `PASS + FAIL`，不包含已经写入 checkpoint 的 `TIMEOUT`。因此 `completed_records == planned` 不能替代 coverage 验收；详细字段和示例见工作流文档第 6.4 节。
+
+官方队列默认使用“连续 2 小时无子进程输出”与“单模块 72 小时硬上限”双 watchdog，避免数万 case 的活跃模块被旧的 12 小时绝对上限误杀。主 `failure_report.csv` 只保留具体 case nodeid；模块级 TIMEOUT/MISSING/ProcessFailure 由 coverage、module status、incomplete 和 unresolved 文件单独记录。
 
 ## 验收原则
 

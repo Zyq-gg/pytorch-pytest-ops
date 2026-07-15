@@ -137,8 +137,10 @@ ENV_SH="$ENV_SH" \
 PYTORCH_ROOT="$PYTORCH_ROOT" \
 NORMAL_WORK_DIR="$WORK" \
 GPU_IDS=0,1,2,3,4,5,6,7 \
-TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=43200 \
+TIMEOUT=259200 \
+IDLE_TIMEOUT=7200 \
+PROCESS_RERUN_TIMEOUT=259200 \
+PROCESS_RERUN_IDLE_TIMEOUT=7200 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-normal
 ```
@@ -152,15 +154,17 @@ ENV_SH="$ENV_SH" \
 PYTORCH_ROOT="$PYTORCH_ROOT" \
 DIST_WORK_DIR="$WORK" \
 GPU_IDS=0,1,2,3,4,5,6,7 \
-TIMEOUT=21600 \
-PROCESS_RERUN_TIMEOUT=43200 \
+TIMEOUT=259200 \
+IDLE_TIMEOUT=7200 \
+PROCESS_RERUN_TIMEOUT=259200 \
+PROCESS_RERUN_IDLE_TIMEOUT=7200 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-distributed
 ```
 
 The distributed action uses one `--no-bind-gpu` worker and inherits every device visible inside the container. Do not run another container against the same GPUs when stable distributed results matter.
 
-The finite 6h/12h watchdog profile can explicitly end with incomplete coverage for very large but active modules. After confirming continued case progress, use `rerun-incomplete-normal` or `rerun-incomplete-distributed` with a larger `PROCESS_RERUN_TIMEOUT`; `0` disables the hard wall-clock limit and therefore requires hang monitoring.
+The default official profile terminates after 2 hours without subprocess output and also retains a 72-hour hard limit. Override `IDLE_TIMEOUT`/`PROCESS_RERUN_IDLE_TIMEOUT` for legitimate silent cases, and override `TIMEOUT`/`PROCESS_RERUN_TIMEOUT` for the absolute limit. A timed-out historical module is restarted from its beginning by `rerun-incomplete-normal` or `rerun-incomplete-distributed`.
 
 ## Custom environment variables
 

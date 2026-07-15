@@ -49,10 +49,12 @@ fi
 PYTORCH_ROOT=${PYTORCH_ROOT:-/workspace/pytorch}
 QUEUE_RUNNER=${QUEUE_RUNNER:-$SCRIPT_DIR/run_official_run_test_queue.py}
 GPU_IDS=${GPU_IDS:-0,1,2,3,4,5,6,7}
-TIMEOUT=${TIMEOUT:-21600}
-# Keep unattended recovery finite. A second timeout is reported explicitly as
-# incomplete instead of leaving the queue blocked forever.
-PROCESS_RERUN_TIMEOUT=${PROCESS_RERUN_TIMEOUT:-43200}
+# Any subprocess output refreshes the idle watchdog. The hard limit still
+# bounds modules that continuously emit output without ever terminating.
+TIMEOUT=${TIMEOUT:-259200}
+IDLE_TIMEOUT=${IDLE_TIMEOUT:-7200}
+PROCESS_RERUN_TIMEOUT=${PROCESS_RERUN_TIMEOUT:-259200}
+PROCESS_RERUN_IDLE_TIMEOUT=${PROCESS_RERUN_IDLE_TIMEOUT:-7200}
 PROCESS_RERUN_ERROR_TYPES=${PROCESS_RERUN_ERROR_TYPES:-Timeout,Crash}
 INCLUDE_REGEX=${INCLUDE_REGEX:-}
 EXCLUDE_REGEX=${EXCLUDE_REGEX:-}
@@ -75,6 +77,7 @@ PROCESS_RERUN_ARGS=(
   --process-rerun
   --process-rerun-error-types "$PROCESS_RERUN_ERROR_TYPES"
   --process-rerun-timeout "$PROCESS_RERUN_TIMEOUT"
+  --process-rerun-idle-timeout "$PROCESS_RERUN_IDLE_TIMEOUT"
 )
 
 COMMON_RUN_TEST_ARGS=(
@@ -108,6 +111,7 @@ case "$cmd" in
       --work-dir "$NORMAL_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
@@ -123,6 +127,7 @@ case "$cmd" in
       --work-dir "$NORMAL_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
       -- "${COMMON_RUN_TEST_ARGS[@]}" \
@@ -162,6 +167,7 @@ case "$cmd" in
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
@@ -178,6 +184,7 @@ case "$cmd" in
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
       -- "${DIST_RUN_TEST_ARGS[@]}" \
@@ -210,6 +217,7 @@ case "$cmd" in
       --work-dir "$FAILURE_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       --failure-csv "$FAILURE_CSV" \
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
@@ -230,6 +238,7 @@ case "$cmd" in
       --work-dir "$FAILURE_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       --failure-csv "$FAILURE_CSV" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
@@ -250,6 +259,7 @@ case "$cmd" in
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       --failure-csv "$FAILURE_CSV" \
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
@@ -271,6 +281,7 @@ case "$cmd" in
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
       --timeout "$TIMEOUT" \
+      --idle-timeout "$IDLE_TIMEOUT" \
       --failure-csv "$FAILURE_CSV" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
