@@ -37,7 +37,7 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
 Run the bundled read-only inspector first:
 
 ```bash
-python3 "$OPS_ROOT/scripts/inspect_test_run.py" <work-dir>
+python3 "$OPS_ROOT/scripts/inspect_test_run.py" <work-dir> --pytorch-root "$PYTORCH_ROOT"
 ```
 
 Then inspect `runner.out`, active timestamp logs, and relevant JSON only as needed. Never conclude completion from `ps` alone. If the process ran on another node, explicitly say local process inspection is not authoritative.

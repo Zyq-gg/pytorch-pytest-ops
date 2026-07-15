@@ -1829,10 +1829,20 @@ nohup env PYTHONUNBUFFERED=1 python3 -u /workspace/pytorch-pytest-ops/runners/re
 
 ```bash
 python3 /workspace/pytorch-pytest-ops/scripts/inspect_test_run.py \
-  /home/tmp/torch2.13/run_test_official_nmz
+  /home/tmp/torch2.13/run_test_official_nmz \
+  --pytorch-root /workspace/pytorch
 ```
 
-检查器中的 `Local work-dir procs` 只代表当前机器。共享目录由其他节点执行时，远端进程仍需在实际节点检查。
+检查器首先输出：
+
+- `Artifact verdict: COMPLETE`：清单、真实文件 checkpoint、summary、补跑 summary、最终报告、unresolved 和 official coverage 均闭合。
+- `Artifact verdict: FINALIZED_INCOMPLETE`：已经生成根 summary/report，但仍存在 unresolved、TIMEOUT、真实缺项或补跑缺 summary。
+- `Artifact verdict: NOT_FINALIZED`：缺少根 summary 或最终失败报告，通常是仍在运行、中断，或日志尚未同步完成。
+- `Virtual targets` 与 `Missing real items`：普通 direct-pytest 的 5 个官方 custom-handler 目标不会再被误算成真实文件漏跑。
+- `Completion issues`：直接列出阻止完整验收的每个条件。
+- `Legacy/version hints`：提示旧 runner 缺少恢复参数、旧 summary 元数据，或报告在 summary 之后被重新分析。
+
+检查器中的 `Local work-dir procs` 只代表当前机器。共享目录由其他节点执行时，远端进程仍需在实际节点检查；`Artifact verdict` 描述磁盘产物是否闭合，不声称远端进程一定不存在。
 
 ### 8.1 看 CSV 中是否还有 process-level 兜底行
 

@@ -3,12 +3,20 @@
 ## Read-only first pass
 
 ```bash
-python3 "$OPS_ROOT/scripts/inspect_test_run.py" <work-dir>
+python3 "$OPS_ROOT/scripts/inspect_test_run.py" <work-dir> --pytorch-root "$PYTORCH_ROOT"
 tail -100 <work-dir>/runner.out
 ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 ```
 
 The process query only describes the current machine. If storage is shared and execution occurred on another node, use files for progress and inspect processes on that node.
+
+The inspector emits an artifact verdict and explicit completion issues:
+
+- `COMPLETE`: all applicable plan, checkpoint, rerun, report, unresolved, and coverage checks close.
+- `FINALIZED_INCOMPLETE`: root summary/report files exist, but unresolved, timeout, real-missing, or rerun-summary issues remain.
+- `NOT_FINALIZED`: required final artifacts are absent.
+
+For ordinary direct pytest, the five known official virtual/custom-handler targets are separated from real missing files. `Legacy/version hints` identify older recovery output or report metadata that was rebuilt after the root summary.
 
 ## Ordinary pytest outputs
 

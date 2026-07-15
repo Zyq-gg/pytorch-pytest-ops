@@ -109,7 +109,8 @@ python3 scripts/self_check.py --pytorch-root /path/to/pytorch
 ```bash
 OPS_ROOT="$HOME/src/pytorch-pytest-ops"
 python3 "$OPS_ROOT/scripts/inspect_test_run.py" \
-  /home/tmp/torch2.13/log-final/pytest_full_nmz
+  /home/tmp/torch2.13/log-final/pytest_full_nmz \
+  --pytorch-root /workspace/pytorch
 ```
 
 输出 JSON：
@@ -122,14 +123,16 @@ python3 "$OPS_ROOT/scripts/inspect_test_run.py" \
 
 状态检查器会汇总：
 
+- `Artifact verdict`：`COMPLETE`、`FINALIZED_INCOMPLETE` 或 `NOT_FINALIZED`
 - 测试入口类型
-- 清单和 checkpoint 数量
+- 清单和 checkpoint 数量，并区分 direct-pytest 的官方 virtual 目标与真实漏跑文件
 - PASS/FAIL/SKIP/TIMEOUT 状态
 - 尚未进入 checkpoint 的项目
 - `summary.json` 是否存在
 - failure 和 unresolved 报告行数
 - 自动文件补跑是否完成
 - 官方模块补跑是否完成，以及 `coverage_complete/planned/terminal/timeout/missing` 和各 timeout 的 idle/hard 类型
+- 明确的 `Completion issues` 和旧版 runner/report 元数据提示
 - 本机命令行中包含该 work-dir 的进程
 
 进程检查只覆盖执行脚本的当前机器。如果日志目录位于共享存储、进程实际运行在另一节点，应在对应节点检查进程，并以 checkpoint、summary 和最终报告共同判断结果。
