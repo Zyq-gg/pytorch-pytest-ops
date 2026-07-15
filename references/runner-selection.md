@@ -18,9 +18,9 @@ Use `$OPS_ROOT/runners/rerun_stable_failures.py` when the input already contains
 
 ## Official run_test.py
 
-Use `$OPS_ROOT/runners/run_pytorch_subset.py run-test-resume` for official module-by-module execution with checkpoint resume, especially distributed tests and custom handlers.
+Use `$OPS_ROOT/runners/run_pytorch_subset.py run-test-resume` for lightweight serial official module execution with checkpoint resume. It is useful for distributed exploration and compatibility with existing work directories, but it does not create official queue coverage files or automatically perform a second complete-module rerun.
 
-Use `$OPS_ROOT/runners/run_test-2.13-official-queue.sh` and its Python queue runner only when the user specifically requests the official normal/distributed queue workflow or is continuing an existing queue work directory. Inspect the shell variables and current `--help` before issuing commands because paths and modes are configurable.
+Use `$OPS_ROOT/runners/run_test-2.13-official-queue.sh` and its Python queue runner for the complete official normal/distributed workflow: dynamic normal GPU workers, inherited-all-GPU distributed execution, process-level module reruns, case reports, `module_status.csv`, `coverage_report.json`, and `incomplete_modules.txt`. Inspect shell variables and current `--help` because paths and modes are configurable.
 
 ## Coverage statement
 

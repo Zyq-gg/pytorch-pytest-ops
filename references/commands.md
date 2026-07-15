@@ -62,6 +62,8 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
   --recovery-case-timeout 600 \
   --recovery-attempts 3 \
   --recovery-max-total-time 7200 \
+  --process-rerun \
+  --process-rerun-error-types Timeout,Crash \
   --process-rerun-timeout 14400 \
   --fresh > "$WORK/runner.out" 2>&1 &
 ```
@@ -128,6 +130,38 @@ python3 "$OPS_ROOT/runners/run_pytorch_subset.py" run-test-resume --help
 
 Keep official `run_test.py` arguments after `--`. Use the same work directory and remove the fresh/reset option on resume.
 
+## Complete official normal queue
+
+```bash
+ENV_SH="$ENV_SH" \
+PYTORCH_ROOT="$PYTORCH_ROOT" \
+NORMAL_WORK_DIR="$WORK" \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=43200 \
+PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
+bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-normal
+```
+
+Resume with `resume-normal`. Require root `summary.json`, the latest completed `process_module_rerun*/summary.json` when selected, no unresolved rows, and `coverage_report.json.coverage_complete == true`. `completed_records == planned` is insufficient because TIMEOUT also has a checkpoint record.
+
+## Complete official distributed queue
+
+```bash
+ENV_SH="$ENV_SH" \
+PYTORCH_ROOT="$PYTORCH_ROOT" \
+DIST_WORK_DIR="$WORK" \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+TIMEOUT=21600 \
+PROCESS_RERUN_TIMEOUT=43200 \
+PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
+bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-distributed
+```
+
+The distributed action uses one `--no-bind-gpu` worker and inherits every device visible inside the container. Do not run another container against the same GPUs when stable distributed results matter.
+
+The finite 6h/12h watchdog profile can explicitly end with incomplete coverage for very large but active modules. After confirming continued case progress, use `rerun-incomplete-normal` or `rerun-incomplete-distributed` with a larger `PROCESS_RERUN_TIMEOUT`; `0` disables the hard wall-clock limit and therefore requires hang monitoring.
+
 ## Custom environment variables
 
 Put variables after `nohup env`, for example:
@@ -137,3 +171,5 @@ nohup env PYTHONUNBUFFERED=1 TORCHINDUCTOR_CPP_MARCH=znver1 python3 -u ...
 ```
 
 Use identical values for discovery, initial execution, automatic reruns, and resumes.
+
+`TORCHINDUCTOR_CPP_MARCH` changes Inductor C++ compilation (`-march=native` versus the requested target). Use it only for an explicitly named configuration, use a separate work directory, and never change it midway through resume/rerun publication.

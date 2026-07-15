@@ -24,15 +24,20 @@ The process query only describes the current machine. If storage is shared and e
 
 ## Official queue outputs
 
-- `run_test_tests.txt` or `run_test_modules.txt`: official module plan.
-- `.run_test_progress.json`: module checkpoint.
-- `<timestamp>/*.log`: per-module official logs.
-- `latest/failure_report.csv`: parsed case failures.
-- `summary.json`: completion and report summary.
+- `run_test_tests.txt`: official queue module plan (`run_test_modules.txt` is used by the lightweight `run-test-resume` entry).
+- `.run_test_progress.json`: module checkpoint; TIMEOUT is recorded but does not count as coverage terminal.
+- `<timestamp>/run_test_gpu_*.log`: normal combined worker logs; distributed uses `run_test_gpu_all.log`.
+- `<timestamp>/process_module_rerun*/`: authoritative complete-module rerun logs and summary.
+- `latest/failure_report.csv`: parsed case failures. A timed-out module with partial case rows may not have an extra module-level Timeout row.
+- `latest/unresolved_process_failures.csv`: nonzero modules without a reliable case nodeid.
+- `module_status.csv`: one row per plan module with status, elapsed, return code, and timestamp. `PASS` and `FAIL` are terminal official returns; `TIMEOUT` was killed by the outer watchdog; `MISSING` has no checkpoint.
+- `incomplete_modules.txt`: missing and TIMEOUT modules.
+- `coverage_report.json`: authoritative official completion result; `terminal` counts only `PASS + FAIL`, and completion requires zero timeout, missing, and unresolved rows plus `coverage_complete: true`.
+- `summary.json`: report, rerun, progress, and coverage index.
 
 ## Completion interpretation
 
-No process plus no summary means interrupted or incomplete, not successful. A summary plus missing checkpoint entries is also incomplete. A nonzero unresolved count means the runner finished but failed to obtain complete case-level conclusions for those files/modules.
+No process plus no summary means interrupted or incomplete, not successful. A summary plus missing checkpoint entries is also incomplete. A nonzero unresolved count means the runner finished but failed to obtain complete case-level conclusions for those files/modules. For the official queue, a summary with `coverage_complete: false` means the command ended with explicit diagnostics but coverage did not close.
 
 For ordinary direct pytest, a plan/progress difference can be caused by official virtual targets that have no matching file. Verify every missing item with `test -f "$PYTORCH_ROOT/test/<item>"` before classifying it as omitted.
 

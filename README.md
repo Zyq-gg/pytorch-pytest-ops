@@ -22,6 +22,7 @@ PyTorch 测试并不只有一种入口。本项目所在环境同时使用：
 - 生成稳定失败 case 重测命令
 - 保持自定义环境变量在首次运行和续跑之间一致
 - 检查计划清单、checkpoint、summary 和最终报告是否对齐
+- 检查官方队列的 `module_status.csv`、`coverage_report.json` 和 `incomplete_modules.txt`
 - 区分文件级 unresolved 与已经定位到 nodeid 的 case 级 Crash/Timeout
 - 查询某个 case 的失败记录和原始日志
 - 给出下一步应运行的精确命令
@@ -128,6 +129,7 @@ python3 "$OPS_ROOT/scripts/inspect_test_run.py" \
 - `summary.json` 是否存在
 - failure 和 unresolved 报告行数
 - 自动文件补跑是否完成
+- 官方模块补跑是否完成，以及 `coverage_complete/planned/terminal/timeout/missing`
 - 本机命令行中包含该 work-dir 的进程
 
 进程检查只覆盖执行脚本的当前机器。如果日志目录位于共享存储、进程实际运行在另一节点，应在对应节点检查进程，并以 checkpoint、summary 和最终报告共同判断结果。
@@ -165,6 +167,9 @@ nohup env PYTHONUNBUFFERED=1 \
   --work-dir "$WORK" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --timeout 1800 \
+  --recovery-case-timeout 600 \
+  --recovery-attempts 3 \
+  --recovery-max-total-time 7200 \
   --process-rerun \
   --process-rerun-error-types Timeout,Crash \
   --process-rerun-timeout 14400 \
@@ -176,6 +181,16 @@ echo $! > "$WORK/runner.pid"
 
 distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `docs/PYTORCH_PYTEST_WORKFLOW.md`。
 
+官方 `run_test.py` 队列还会生成：
+
+- `module_status.csv`：每个计划模块的最终 `status/elapsed/returncode/time`；`TIMEOUT/MISSING` 都表示覆盖未闭合
+- `coverage_report.json`：`planned/terminal/pass/fail/timeout/missing/unresolved_process_failures` 和最终 `coverage_complete`
+- `incomplete_modules.txt`：仍为 TIMEOUT 或缺 checkpoint 的模块清单
+
+官方队列即使命令退出并生成 `summary.json`，只要 `coverage_complete` 不是 `true`，就仍属于“运行已收尾但覆盖不完整”。
+
+其中 `terminal` 只统计真正返回的 `PASS + FAIL`，不包含已经写入 checkpoint 的 `TIMEOUT`。因此 `completed_records == planned` 不能替代 coverage 验收；详细字段和示例见工作流文档第 6.4 节。
+
 ## 验收原则
 
 普通 pytest 任务不能只凭“进程消失”认定完成。至少应确认：
@@ -185,6 +200,8 @@ distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `d
 3. 根目录存在 `summary.json`。
 4. `latest/failure_report.csv` 已生成。
 5. `unresolved_process_failure_count` 为 `0`。
+
+官方队列还必须要求 `coverage_report.json.coverage_complete` 为 `true`。`completed_records` 可以包含 TIMEOUT，不能单独作为完成证据。
 
 具体 `file.py::Class::case` 的 `error_type=Crash/Timeout` 表示异常已经定位到明确 case，不属于文件级遗漏，不应为了让错误类型消失而过滤真实失败。
 
@@ -228,10 +245,12 @@ pytorch-pytest-ops/
 - `scripts/self_check.py`：不依赖第三方包的仓库完整性和命令入口自检
 - `tests/test_stepcurrent_cache_compat.py`：PyTorch 2.9/2.13 stepcurrent 布局回归测试
 - `tests/test_recovery_budget.py`：恢复超时预算与精确 case 重试回归测试
+- `tests/test_official_queue_completion.py`：官方模块补跑、unresolved 和 coverage 回归测试
 
 ## 安全边界
 
 - 状态查询默认只读，不自动启动、停止或清理进程。
 - 新任务可以使用 `--fresh`；续跑同一目录时不能继续使用 `--fresh`。
 - 自定义环境变量必须在 dry-run、正式运行、自动补跑和续跑时保持一致。
+- `TORCHINDUCTOR_CPP_MARCH` 会改变 Inductor C++ 编译目标；不同值必须使用不同 work-dir，已有 `*_znver1*` 任务续跑时必须保持该值。
 - 普通 direct-pytest、官方 custom handlers 和 distributed-tests 是不同覆盖类别，不能互相替代。
