@@ -1,10 +1,12 @@
 import csv
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 RUNNERS = Path(__file__).resolve().parents[1] / "runners"
@@ -130,6 +132,102 @@ class OfficialQueueCompletionTest(unittest.TestCase):
                 [row["case_name"] for row in result],
                 ["new_authoritative_failure", "other_failure"],
             )
+
+    def test_resume_reuses_reported_failures_and_retries_only_incomplete_modules(self):
+        rows = [
+            {
+                "test_file": "test_reported.py",
+                "nodeid": "test_reported.py::Tests::test_failure",
+                "case_name": "test_failure",
+                "error_type": "AssertionError",
+            },
+            {
+                "test_file": "test_unreported.py",
+                "nodeid": "test_unreported.py",
+                "case_name": "<process-failure>",
+                "error_type": "ProcessFailure",
+            },
+        ]
+        remaining, stats = QUEUE.select_resume_modules(
+            ["test_pass", "test_reported", "test_unreported", "test_timeout", "test_missing"],
+            {
+                "test_pass": {"status": "PASS"},
+                "test_reported": {"status": "FAIL"},
+                "test_unreported": {"status": "FAIL"},
+                "test_timeout": {"status": "TIMEOUT"},
+            },
+            rows,
+            skip_fail=False,
+        )
+        self.assertEqual(
+            remaining,
+            ["test_unreported", "test_timeout", "test_missing"],
+        )
+        self.assertEqual(stats["reused_fail"], 1)
+        self.assertEqual(stats["retry_fail"], 1)
+
+    def test_new_module_result_replaces_old_rows_even_when_it_has_no_failure_rows(self):
+        old_rows = [
+            {
+                "test_file": "test_flaky.py",
+                "nodeid": "test_flaky.py::Tests::test_old_failure",
+            },
+            {
+                "test_file": "test_other.py",
+                "nodeid": "test_other.py::Tests::test_failure",
+            },
+        ]
+        self.assertEqual(
+            QUEUE.replace_module_rows(old_rows, {"test_flaky"}, []),
+            [old_rows[1]],
+        )
+
+    def test_legacy_checkpoint_discovers_latest_completed_worker_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            old_log = work / "20260101_000000" / "run_test_gpu_0.log"
+            new_log = work / "20260102_000000" / "run_test_gpu_0.log"
+            old_log.parent.mkdir()
+            new_log.parent.mkdir()
+            old_log.write_text(
+                "===== 00:00:01 FAIL: test_example (1.0s, rc=1) =====\n",
+                encoding="utf-8",
+            )
+            new_log.write_text(
+                "===== 00:00:02 FAIL: test_example (2.0s, rc=1) =====\n",
+                encoding="utf-8",
+            )
+            os.utime(old_log, (1, 1))
+            os.utime(new_log, (2, 2))
+            self.assertEqual(
+                QUEUE.discover_completed_module_logs(work)["test_example"],
+                str(new_log.resolve()),
+            )
+
+    def test_checkpoint_rows_use_recorded_source_and_filter_shared_worker_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "run_test_gpu_0.log"
+            source.write_text("worker log\n", encoding="utf-8")
+            parsed = [
+                {
+                    "test_file": "test_one.py",
+                    "nodeid": "test_one.py::Tests::test_failure",
+                },
+                {
+                    "test_file": "test_two.py",
+                    "nodeid": "test_two.py::Tests::test_failure",
+                },
+            ]
+            with mock.patch.object(
+                QUEUE, "collect_failures_from_logs", return_value=parsed
+            ) as collect:
+                rows = QUEUE.collect_checkpoint_failure_rows(
+                    Path(tmp),
+                    ["test_one"],
+                    {"test_one": {"status": "FAIL", "source_log": str(source)}},
+                )
+            self.assertEqual([row["test_file"] for row in rows], ["test_one.py"])
+            collect.assert_called_once_with(str(source))
 
     def test_coverage_requires_no_missing_timeout_or_unresolved_modules(self):
         with tempfile.TemporaryDirectory() as tmp:

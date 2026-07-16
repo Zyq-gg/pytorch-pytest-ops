@@ -38,9 +38,11 @@ For ordinary direct pytest, the five known official virtual/custom-handler targe
 - `<timestamp>/process_module_rerun*/`: authoritative complete-module rerun logs and summary.
 - `latest/failure_report.csv`: parsed failures with concrete case nodeids only.
 - `latest/unresolved_process_failures.csv`: nonzero modules without a reliable case nodeid.
-- `module_status.csv`: one row per plan module with status, elapsed, return code, attempts, timeout kind/limits, and timestamp. `PASS` and `FAIL` are terminal official returns; `TIMEOUT` was killed by the outer watchdog; `MISSING` has no checkpoint.
+- `module_status.csv`: one row per plan module with status, elapsed, return code, attempts, timeout kind/limits, timestamp, and authoritative `source_log`. `PASS` and `FAIL` are terminal official returns; `TIMEOUT` was killed by the outer watchdog; `MISSING` has no checkpoint.
 - `incomplete_modules.txt`: missing and TIMEOUT modules.
 - `coverage_report.json`: authoritative official completion result; `terminal` counts only `PASS + FAIL`, `timeout_details` records idle/hard diagnostics, and completion requires zero timeout, missing, and unresolved rows plus `coverage_complete: true`.
+
+Official queue resume reuses a checkpointed FAIL when its authoritative historical log already contains a concrete case nodeid. It reruns only unreported FAIL, TIMEOUT, and MISSING modules, then replaces old rows for executed modules while retaining reliable historical rows for modules that were not rerun. Legacy checkpoints without `source_log` are resolved from terminal markers in historical worker logs.
 - `summary.json`: report, rerun, progress, and coverage index.
 
 ## Completion interpretation

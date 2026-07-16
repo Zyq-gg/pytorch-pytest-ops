@@ -147,6 +147,8 @@ bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-normal
 
 Resume with `resume-normal`. Require root `summary.json`, the latest completed `process_module_rerun*/summary.json` when selected, no unresolved rows, and `coverage_report.json.coverage_complete == true`. `completed_records == planned` is insufficient because TIMEOUT also has a checkpoint record.
 
+Current official queue resume preserves reliable historical FAIL reports across timestamp directories. Startup reports `Done FAIL: N (reuse X, retry Y)`; `Need run` contains unreported FAIL, TIMEOUT, and MISSING modules, not every old FAIL. The final report keeps historical `source_log` values for reused modules and replaces every old row for modules executed during the resume.
+
 ## Complete official distributed queue
 
 ```bash

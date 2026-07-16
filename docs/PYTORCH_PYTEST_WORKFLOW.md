@@ -1477,7 +1477,7 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
 
 - `run_test_dry_run.out`：官方 dry-run 原始输出；只有 runner 自己执行 dry-run 时生成。
 - `run_test_tests.txt`：去重、筛选后的官方模块计划，保留模块名而不是 `.py` 文件名。
-- `.run_test_progress.json`：模块 checkpoint。`tests.<module>` 保存最新 `status/elapsed/returncode/time/timeout_kind`，并在 `history` 中保留各次 attempt；`PASS/FAIL/TIMEOUT` 都会占一条 completed record。
+- `.run_test_progress.json`：模块 checkpoint。`tests.<module>` 保存最新 `status/elapsed/returncode/time/timeout_kind/source_log`，并在 `history` 中保留各次 attempt；`source_log` 指向产生当前权威状态的 worker 日志。旧版 checkpoint 没有该字段时，resume 会扫描历史 `START/END` 标记自动回溯。`PASS/FAIL/TIMEOUT` 都会占一条 completed record。
 - `latest`：指向首次/续跑创建的主 timestamp 目录。`process-rerun-only` 在该目录下面追加补跑子目录，不会把 `latest` 改指向子目录。
 - `run_test_gpu_<id>.log`：normal 模式每个 GPU worker 的合并日志；同一文件依次包含该 worker 执行的多个模块，以 `START/PASS/FAIL/TIMEOUT` 标记分段，不是每模块一个文件。
 - `process_module_rerun*/run_test_tests.txt`：该轮权威完整模块补跑选择清单。
@@ -1485,7 +1485,7 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
 - `latest/failure_report.csv/json/md`：只保存能映射到具体 `file.py::Class::case` nodeid 的失败 case。补跑模块的旧部分日志行会被替换。
 - `latest/unresolved_process_failures.*`：官方返回非零但无法映射到可靠 case 的模块级行，例如 custom-handler 编译失败或导入/收集阶段异常。
 - `summary.json`：当前主计划、最终报告、补跑清单/结果、`progress_stats`、本次 `timeouts` 配置和 coverage 的总索引。
-- `module_status.csv`：计划中的每个模块一行，列中除 `module,status,elapsed,returncode,time` 外还包含 `attempts,timeout_kind,hard_timeout,idle_timeout`。`PASS` 表示官方进程返回 0；`FAIL` 表示官方进程已经返回非零；`TIMEOUT` 表示被队列外层 watchdog 截断；`MISSING` 表示计划中存在但没有 checkpoint。
+- `module_status.csv`：计划中的每个模块一行，列中除 `module,status,elapsed,returncode,time` 外还包含 `attempts,timeout_kind,hard_timeout,idle_timeout,source_log`。`PASS` 表示官方进程返回 0；`FAIL` 表示官方进程已经返回非零；`TIMEOUT` 表示被队列外层 watchdog 截断；`MISSING` 表示计划中存在但没有 checkpoint。
 - `incomplete_modules.txt`：仍为 `TIMEOUT` 或缺少 checkpoint 的模块名；完整时为空。
 - `coverage_report.json`：最终覆盖闭合结论，是官方队列验收的权威文件。
 
@@ -1551,7 +1551,24 @@ PYTORCH_NUM_PYTEST_RERUNS=2 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-normal
 ```
 
-PASS 跳过，FAIL/TIMEOUT 默认重跑。确认模块不遗漏：
+新版 resume 会跨时间戳复用历史模块结果：
+
+- `PASS`：直接跳过。
+- `FAIL` 且历史权威日志已经有具体 case nodeid：复用历史失败行，不重跑。
+- `FAIL` 但历史日志没有可靠 case：重新执行整个模块。
+- `TIMEOUT`：重新执行整个模块。
+- 缺少 checkpoint：重新执行整个模块。
+
+因此中断目录里若已有 19 个 FAIL，其中 18 个已有具体 case、1 个没有报告，同时还有 45 个未完成模块，启动输出会是：
+
+```text
+Done FAIL:    19 (reuse 18, retry 1)
+Need run:     46
+```
+
+最终报告按模块合并历史和本次日志：本次重跑模块的旧行会被删除并由新结果替换；没有重跑的可靠 FAIL 保留原 `source_log`。这样既避免无意义重跑，也不会把半截旧日志与新日志混成重复 case。显式传 `--skip-fail` 时仍会跳过所有旧 FAIL/TIMEOUT，主要用于只关心未运行模块的特殊场景，不作为完整最终报告的默认选择。
+
+确认模块不遗漏：
 
 ```bash
 python3 - <<'PY'
@@ -1743,6 +1760,8 @@ PROCESS_RERUN_TIMEOUT=259200 \
 PROCESS_RERUN_IDLE_TIMEOUT=7200 \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-distributed
 ```
+
+distributed resume 与 6.6 使用同一套跨时间戳复用逻辑。已有具体 case 报告的 FAIL 不再重复执行；只有无可靠 case 的 FAIL、TIMEOUT 和缺 checkpoint 模块进入单 worker 队列。旧版 checkpoint 没有 `source_log` 时会从历史 `run_test_gpu_all.log` 的终态标记恢复来源，最终 CSV 保留旧失败 case 的原始日志路径，并用本次执行结果替换重跑模块的旧行。
 
 把 6.6 对账脚本的 work-dir 改成 distributed 目录。正常结束必须 summary/report 完整，并且 `coverage_report.json` 同时满足 `missing: 0`、`timeout: 0`、`unresolved_process_failures: 0`、`coverage_complete: true`。只看到 `.run_test_progress.json` 已有全部模块记录仍不够，因为其中可能包含 `TIMEOUT`。
 

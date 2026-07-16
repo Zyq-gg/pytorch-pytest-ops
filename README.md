@@ -23,6 +23,7 @@ PyTorch 测试并不只有一种入口。本项目所在环境同时使用：
 - 保持自定义环境变量在首次运行和续跑之间一致
 - 检查计划清单、checkpoint、summary 和最终报告是否对齐
 - 检查官方队列的 `module_status.csv`、`coverage_report.json` 和 `incomplete_modules.txt`
+- 官方队列续跑时复用历史时间戳目录中已有具体 case 的 FAIL，只重跑无报告 FAIL、TIMEOUT 和缺 checkpoint 模块
 - 区分文件级 unresolved 与已经定位到 nodeid 的 case 级 Crash/Timeout
 - 查询某个 case 的失败记录和原始日志
 - 给出下一步应运行的精确命令
@@ -186,11 +187,13 @@ distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `d
 
 官方 `run_test.py` 队列还会生成：
 
-- `module_status.csv`：每个计划模块的最终 `status/elapsed/returncode/time/attempts/timeout_kind`；`TIMEOUT/MISSING` 都表示覆盖未闭合
+- `module_status.csv`：每个计划模块的最终 `status/elapsed/returncode/time/attempts/timeout_kind/source_log`；`TIMEOUT/MISSING` 都表示覆盖未闭合
 - `coverage_report.json`：`planned/terminal/pass/fail/timeout/missing/unresolved_process_failures/timeout_details` 和最终 `coverage_complete`
 - `incomplete_modules.txt`：仍为 TIMEOUT 或缺 checkpoint 的模块清单
 
 官方队列即使命令退出并生成 `summary.json`，只要 `coverage_complete` 不是 `true`，就仍属于“运行已收尾但覆盖不完整”。
+
+官方队列的 checkpoint 会记录产生当前模块状态的 `source_log`。中断续跑时，已有具体 case 报告的 FAIL 直接复用旧日志；只有没有可靠 case 的 FAIL、TIMEOUT 和未运行模块进入队列。旧版 checkpoint 没有 `source_log` 时，runner 会扫描历史 worker 日志中的模块终态标记兼容恢复，最终报告再按模块用新结果替换旧结果。
 
 其中 `terminal` 只统计真正返回的 `PASS + FAIL`，不包含已经写入 checkpoint 的 `TIMEOUT`。因此 `completed_records == planned` 不能替代 coverage 验收；详细字段和示例见工作流文档第 6.4 节。
 

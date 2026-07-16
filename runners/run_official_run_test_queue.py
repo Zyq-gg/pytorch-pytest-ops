@@ -33,7 +33,6 @@ from pathlib import Path
 
 from run_pytorch_tests_prefix import (
     collect_failures_from_logs,
-    generate_failure_reports,
     generate_failure_reports_from_rows,
     is_process_level_failure,
 )
@@ -47,6 +46,9 @@ DEFAULT_TEST_ENV = {
 
 TEST_LINE_RE = re.compile(r"^\s{2,}(.+?)\s+\d+/\d+\s*$")
 BLOCK_RE = re.compile(r"^\s*(Serial|Parallel) tests\s*\(\d+\)\s*:")
+MODULE_END_RE = re.compile(
+    r"^===== .* (PASS|FAIL|TIMEOUT): (.+?) \([^)]*s, rc=.*\) =====$"
+)
 
 _progress_lock = threading.Lock()
 
@@ -134,6 +136,117 @@ def replace_rerun_module_rows(
             continue
         filtered.append(row)
     return filtered
+
+
+def replace_module_rows(
+    rows: list[dict[str, str]],
+    modules: set[str],
+    replacement_rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Replace every old report row for modules with authoritative new rows."""
+    return [
+        row
+        for row in rows
+        if test_file_to_module(row.get("test_file", "")) not in modules
+    ] + [
+        row
+        for row in replacement_rows
+        if test_file_to_module(row.get("test_file", "")) in modules
+    ]
+
+
+def concrete_failure_modules(rows: list[dict[str, str]]) -> set[str]:
+    """Return modules that already have at least one concrete case failure."""
+    return {
+        test_file_to_module(row.get("test_file", ""))
+        for row in rows
+        if row.get("test_file") and not is_process_level_failure(row)
+    }
+
+
+def discover_completed_module_logs(work_dir: Path) -> dict[str, str]:
+    """Map legacy checkpoints to the newest worker log with a terminal marker."""
+    candidates = sorted(
+        (path for path in work_dir.rglob("run_test_gpu_*.log") if path.is_file()),
+        key=lambda path: (path.stat().st_mtime_ns, str(path)),
+    )
+    sources: dict[str, str] = {}
+    for path in candidates:
+        with path.open(encoding="utf-8", errors="replace") as log:
+            for raw_line in log:
+                match = MODULE_END_RE.match(raw_line.strip())
+                if match:
+                    sources[match.group(2)] = str(path.resolve())
+    return sources
+
+
+def collect_checkpoint_failure_rows(
+    work_dir: Path,
+    tests: list[str],
+    progress: dict[str, dict],
+) -> list[dict[str, str]]:
+    """Collect authoritative failure rows referenced by the current checkpoint."""
+    legacy_sources: dict[str, str] | None = None
+    parsed_by_source: dict[str, list[dict[str, str]]] = {}
+    rows: list[dict[str, str]] = []
+    for module in tests:
+        item = progress.get(module, {})
+        if item.get("status") not in {"FAIL", "TIMEOUT"}:
+            continue
+        source_log = item.get("source_log", "")
+        if not source_log:
+            if legacy_sources is None:
+                legacy_sources = discover_completed_module_logs(work_dir)
+            source_log = legacy_sources.get(module, "")
+        if not source_log or not Path(source_log).is_file():
+            continue
+        if source_log not in parsed_by_source:
+            parsed_by_source[source_log] = collect_failures_from_logs(source_log)
+        rows.extend(
+            row
+            for row in parsed_by_source[source_log]
+            if test_file_to_module(row.get("test_file", "")) == module
+        )
+    return rows
+
+
+def select_resume_modules(
+    tests: list[str],
+    progress: dict[str, dict],
+    checkpoint_rows: list[dict[str, str]],
+    *,
+    skip_fail: bool,
+) -> tuple[list[str], dict[str, int]]:
+    """Select only missing, timed-out, or unreported failed modules."""
+    reusable_failures = concrete_failure_modules(checkpoint_rows)
+    remaining: list[str] = []
+    stats = {
+        "pass": 0,
+        "fail": 0,
+        "timeout": 0,
+        "reused_fail": 0,
+        "retry_fail": 0,
+    }
+    for module in tests:
+        status = progress.get(module, {}).get("status")
+        if status == "PASS":
+            stats["pass"] += 1
+        elif status == "FAIL":
+            stats["fail"] += 1
+            if skip_fail:
+                continue
+            if module in reusable_failures:
+                stats["reused_fail"] += 1
+            else:
+                stats["retry_fail"] += 1
+                remaining.append(module)
+        elif status == "TIMEOUT":
+            stats["timeout"] += 1
+            if not skip_fail:
+                remaining.append(module)
+        else:
+            remaining.append(module)
+    return remaining, stats
 
 
 def select_process_rerun_modules(
@@ -246,6 +359,7 @@ def write_module_coverage(
                 "timeout_kind": item.get("timeout_kind", "") if item else "",
                 "hard_timeout": item.get("hard_timeout", "") if item else "",
                 "idle_timeout": item.get("idle_timeout", "") if item else "",
+                "source_log": item.get("source_log", "") if item else "",
             }
         )
     csv_path = work_dir / "module_status.csv"
@@ -262,6 +376,7 @@ def write_module_coverage(
                 "timeout_kind",
                 "hard_timeout",
                 "idle_timeout",
+                "source_log",
             ],
         )
         writer.writeheader()
@@ -379,6 +494,17 @@ def write_latest(work_dir: Path, log_dir: Path) -> None:
         (work_dir / "latest.txt").write_text(str(log_dir), encoding="utf-8")
 
 
+def resolve_latest(work_dir: Path) -> Path | None:
+    latest = work_dir / "latest"
+    if latest.is_symlink() or latest.is_dir():
+        return latest.resolve()
+    latest_txt = work_dir / "latest.txt"
+    if latest_txt.is_file():
+        path = Path(latest_txt.read_text(encoding="utf-8").strip())
+        return path if path.is_dir() else None
+    return None
+
+
 def load_progress(path: Path) -> dict[str, dict]:
     if not path.exists():
         return {}
@@ -399,6 +525,7 @@ def save_progress(
     timeout_kind: str = "",
     hard_timeout: int = 0,
     idle_timeout: int = 0,
+    source_log: str = "",
 ) -> None:
     with _progress_lock:
         data = {}
@@ -422,6 +549,7 @@ def save_progress(
                         "timeout_kind",
                         "hard_timeout",
                         "idle_timeout",
+                        "source_log",
                     )
                 }
             )
@@ -433,6 +561,7 @@ def save_progress(
             "timeout_kind": timeout_kind,
             "hard_timeout": hard_timeout,
             "idle_timeout": idle_timeout,
+            "source_log": source_log,
         }
         history.append(dict(attempt))
         tests[test_name] = {**attempt, "attempts": len(history), "history": history}
@@ -603,6 +732,7 @@ def run_one(
                 timeout_kind=timed_out_by,
                 hard_timeout=hard_timeout,
                 idle_timeout=idle_timeout,
+                source_log=str(log_path.resolve()),
             )
             log.write(
                 f"===== {datetime.now().strftime('%H:%M:%S')} {status}: {test_name} "
@@ -807,53 +937,57 @@ def main() -> int:
     if args.fresh and progress_file.exists():
         progress_file.unlink()
     progress = load_progress(progress_file)
-
-    remaining: list[str] = []
-    done_pass = done_fail = done_timeout = 0
-    for test in tests:
-        item = progress.get(test, {})
-        status = item.get("status")
-        if status == "PASS":
-            done_pass += 1
-        elif status == "FAIL":
-            done_fail += 1
-            if not args.skip_fail:
-                remaining.append(test)
-        elif status == "TIMEOUT":
-            done_timeout += 1
-            if not args.skip_fail:
-                remaining.append(test)
-        else:
-            remaining.append(test)
+    checkpoint_rows = (
+        [] if args.fresh else collect_checkpoint_failure_rows(work_dir, tests, progress)
+    )
+    reusable_failure_modules = concrete_failure_modules(checkpoint_rows)
+    remaining, resume_stats = select_resume_modules(
+        tests,
+        progress,
+        checkpoint_rows,
+        skip_fail=args.skip_fail,
+    )
 
     gpu_ids: list[int | None] = [None] if args.no_bind_gpu else parse_gpu_ids(args.gpu_ids)
-    print(f"Done PASS:    {done_pass}", flush=True)
-    print(f"Done FAIL:    {done_fail}" + (" skip" if args.skip_fail else " retry"), flush=True)
-    print(f"Done TIMEOUT: {done_timeout}" + (" skip" if args.skip_fail else " retry"), flush=True)
+    print(f"Done PASS:    {resume_stats['pass']}", flush=True)
+    if args.skip_fail:
+        fail_note = " skip"
+    else:
+        fail_note = (
+            f" (reuse {resume_stats['reused_fail']}, "
+            f"retry {resume_stats['retry_fail']})"
+        )
+    print(f"Done FAIL:    {resume_stats['fail']}{fail_note}", flush=True)
+    print(
+        f"Done TIMEOUT: {resume_stats['timeout']}"
+        + (" skip" if args.skip_fail else " retry"),
+        flush=True,
+    )
     print(f"Need run:     {len(remaining)}", flush=True)
     print(
         "GPU IDs:      " + ("inherited/all (single worker)" if args.no_bind_gpu else ",".join(str(x) for x in gpu_ids)),
         flush=True,
     )
     if not remaining and not args.process_rerun_only:
-        print("All selected tests completed.", flush=True)
-        return 0
+        print("All selected tests already have reusable terminal results.", flush=True)
 
     remaining = sort_modules_by_history(remaining, progress)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.process_rerun_only:
-        latest = work_dir / "latest"
-        if latest.is_symlink() or latest.is_dir():
-            log_dir = latest.resolve()
-        elif (work_dir / "latest.txt").is_file():
-            log_dir = Path((work_dir / "latest.txt").read_text(encoding="utf-8").strip())
-        else:
+        log_dir = resolve_latest(work_dir)
+        if log_dir is None:
             raise SystemExit(f"existing latest result does not exist under {work_dir}")
-    else:
+    elif remaining:
         log_dir = work_dir / timestamp
         log_dir.mkdir(parents=True, exist_ok=True)
         write_latest(work_dir, log_dir)
+    else:
+        log_dir = resolve_latest(work_dir)
+        if log_dir is None:
+            log_dir = work_dir / timestamp
+            log_dir.mkdir(parents=True, exist_ok=True)
+            write_latest(work_dir, log_dir)
     print(f"log dir:      {log_dir}", flush=True)
     print(f"progress:     {progress_file}", flush=True)
 
@@ -872,19 +1006,22 @@ def main() -> int:
         )
 
     progress = load_progress(progress_file)
+    current_rows = collect_failures_from_logs(str(log_dir)) if remaining else []
+    authoritative_rows = replace_module_rows(
+        checkpoint_rows,
+        set(remaining),
+        current_rows,
+    )
     failure_reports: dict = {}
-    if not args.no_analyze:
-        failure_reports = generate_failure_reports(str(log_dir))
 
     process_rerun_modules: list[str] = []
     process_rerun_results: list[dict] = []
     process_rerun_dir: Path | None = None
     if args.process_rerun and not args.no_analyze:
-        initial_rows = collect_failures_from_logs(str(log_dir))
         wanted_types = parse_csv_items(args.process_rerun_error_types)
         progress = load_progress(progress_file)
         process_rerun_modules = select_process_rerun_modules(
-            tests, progress, initial_rows, wanted_types
+            tests, progress, authoritative_rows, wanted_types
         )
         process_rerun_modules = sort_modules_by_history(process_rerun_modules, progress)
         if process_rerun_modules:
@@ -925,18 +1062,16 @@ def main() -> int:
                 encoding="utf-8",
             )
             progress = load_progress(progress_file)
-            final_rows = collect_failures_from_logs(str(log_dir))
-            final_rows = replace_rerun_module_rows(
-                final_rows, set(process_rerun_modules), process_rerun_dir
-            )
-            final_rows = append_unreported_terminal_rows(final_rows, tests, progress)
-            failure_reports = generate_failure_reports_from_rows(
-                str(log_dir), final_rows, include_process_rows_in_main=False
+            rerun_rows = collect_failures_from_logs(str(process_rerun_dir))
+            authoritative_rows = replace_module_rows(
+                authoritative_rows,
+                set(process_rerun_modules),
+                rerun_rows,
             )
 
     progress = load_progress(progress_file)
-    if not args.no_analyze and not process_rerun_modules:
-        final_rows = collect_failures_from_logs(str(log_dir))
+    if not args.no_analyze:
+        final_rows = authoritative_rows
         final_rows = append_unreported_terminal_rows(final_rows, tests, progress)
         failure_reports = generate_failure_reports_from_rows(
             str(log_dir), final_rows, include_process_rows_in_main=False
@@ -960,6 +1095,14 @@ def main() -> int:
         },
         "elapsed_seconds": round(time.time() - start, 1),
         "worker_results": results,
+        "resume_reused_failure_modules": [
+            module
+            for module in tests
+            if progress.get(module, {}).get("status") == "FAIL"
+            and module in reusable_failure_modules
+            and module not in remaining
+        ],
+        "resume_executed_modules": remaining,
         "process_rerun_modules": process_rerun_modules,
         "process_rerun_results": process_rerun_results,
         "process_rerun_dir": str(process_rerun_dir) if process_rerun_dir else "",
