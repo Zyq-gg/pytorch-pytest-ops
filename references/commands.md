@@ -149,6 +149,8 @@ Resume with `resume-normal`. Require root `summary.json`, the latest completed `
 
 Current official queue resume preserves reliable historical FAIL reports across timestamp directories. Startup reports `Done FAIL: N (reuse X, retry Y)`; `Need run` contains unreported FAIL, TIMEOUT, and MISSING modules, not every old FAIL. The final report keeps historical `source_log` values for reused modules and replaces every old row for modules executed during the resume.
 
+Running Python processes do not reload parser updates. After they exit, execute the same resume action against the same work directory. If startup reports `Need run: 0`, no modules are rerun; checkpoint `source_log` entries are reparsed and the cross-timestamp final reports/coverage are rebuilt.
+
 ## Complete official distributed queue
 
 ```bash

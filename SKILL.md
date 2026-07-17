@@ -25,6 +25,7 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
 ### Give a run command
 
 1. Identify the entry point and category: ordinary pytest, pytest subset, process-level file rerun, stable case rerun, official normal queue, or official distributed queue.
+   For a new unattended distributed full run, prefer the complete official queue; use lightweight `run-test-resume` only for exploration or compatibility with its existing work directories.
 2. Include `source "$ENV_SH"` only when an environment script exists, and always create `$WORK`.
 3. For a long run, use `nohup env PYTHONUNBUFFERED=1 python3 -u ... > "$WORK/runner.out" 2>&1 &` and save `$!` to `runner.pid`.
 4. For a new run, include `--fresh`. For resume, use the same work directory and semantic parameters but remove `--fresh`.
@@ -57,7 +58,7 @@ Require all applicable conditions:
 
 Treat a concrete `file.py::Class::case` with `error_type=Crash` or `Timeout` as a located case failure, not process-level unresolved. Do not delete it merely to make error-type counts zero.
 
-For the complete official queue, `failure_report.csv` contains only concrete case nodeids. Read module-level timeout/missing/process failures from `module_status.csv`, `coverage_report.json`, `incomplete_modules.txt`, and `unresolved_process_failures.csv` instead.
+For the complete official queue, `failure_report.csv` contains only concrete case nodeids, but it is recall-first: official stable summaries and ordinary pytest FAILED lines are merged, so a flaky case that later passed may remain. Read module-level timeout/missing/process failures from `module_status.csv`, `coverage_report.json`, `incomplete_modules.txt`, and `unresolved_process_failures.csv`; use stable case reruns when the user needs a precision-oriented consistently-failing set.
 
 ### Diagnose count mismatches
 

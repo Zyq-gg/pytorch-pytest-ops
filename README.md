@@ -184,7 +184,7 @@ nohup env PYTHONUNBUFFERED=1 \
 echo $! > "$WORK/runner.pid"
 ```
 
-distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `docs/PYTORCH_PYTEST_WORKFLOW.md`。
+distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `docs/PYTORCH_PYTEST_WORKFLOW.md`。新建无人值守 distributed 全量使用完整官方队列的 `run-distributed`；`run_pytorch_subset.py run-test-resume` 只作为轻量探索和旧目录兼容入口。
 
 官方 `run_test.py` 队列还会生成：
 
@@ -198,7 +198,7 @@ distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `d
 
 其中 `terminal` 只统计真正返回的 `PASS + FAIL`，不包含已经写入 checkpoint 的 `TIMEOUT`。因此 `completed_records == planned` 不能替代 coverage 验收；详细字段和示例见工作流文档第 6.4 节。
 
-官方队列默认使用“连续 2 小时无子进程输出”与“单模块 72 小时硬上限”双 watchdog，避免数万 case 的活跃模块被旧的 12 小时绝对上限误杀。主 `failure_report.csv` 只保留具体 case nodeid；模块级 TIMEOUT/MISSING/ProcessFailure 由 coverage、module status、incomplete 和 unresolved 文件单独记录。
+官方队列默认使用“连续 2 小时无子进程输出”与“单模块 72 小时硬上限”双 watchdog，避免数万 case 的活跃模块被旧的 12 小时绝对上限误杀。主 `failure_report.csv` 只保留具体 case nodeid，并按“不遗漏优先”合并官方稳定失败和普通 pytest FAILED，因此可能包含后来通过的 flaky 候选；模块级 TIMEOUT/MISSING/ProcessFailure 由 coverage、module status、incomplete 和 unresolved 文件单独记录。
 
 ## 验收原则
 

@@ -36,14 +36,16 @@ For ordinary direct pytest, the five known official virtual/custom-handler targe
 - `.run_test_progress.json`: module checkpoint; records latest elapsed/timeout kind plus per-attempt history. TIMEOUT is recorded but does not count as coverage terminal.
 - `<timestamp>/run_test_gpu_*.log`: normal combined worker logs; distributed uses `run_test_gpu_all.log`.
 - `<timestamp>/process_module_rerun*/`: authoritative complete-module rerun logs and summary.
-- `latest/failure_report.csv`: parsed failures with concrete case nodeids only.
+- `latest/failure_report.csv`: recall-first failure candidates with concrete case nodeids only. It merges official stable summaries and ordinary pytest FAILED lines, so flaky cases that later passed may remain.
 - `latest/unresolved_process_failures.csv`: nonzero modules without a reliable case nodeid.
 - `module_status.csv`: one row per plan module with status, elapsed, return code, attempts, timeout kind/limits, timestamp, and authoritative `source_log`. `PASS` and `FAIL` are terminal official returns; `TIMEOUT` was killed by the outer watchdog; `MISSING` has no checkpoint.
 - `incomplete_modules.txt`: missing and TIMEOUT modules.
 - `coverage_report.json`: authoritative official completion result; `terminal` counts only `PASS + FAIL`, `timeout_details` records idle/hard diagnostics, and completion requires zero timeout, missing, and unresolved rows plus `coverage_complete: true`.
+- `summary.json`: report, rerun, progress, and coverage index.
 
 Official queue resume reuses a checkpointed FAIL when its authoritative historical log already contains a concrete case nodeid. It reruns only unreported FAIL, TIMEOUT, and MISSING modules, then replaces old rows for executed modules while retaining reliable historical rows for modules that were not rerun. Legacy checkpoints without `source_log` are resolved from terminal markers in historical worker logs.
-- `summary.json`: report, rerun, progress, and coverage index.
+
+Checkpoint counts update only after a whole official module returns. During a long module, use worker-log mtime/size and the latest case/session output to distinguish active execution from interruption. For a parser upgrade after a multi-timestamp resume, rerun the same official `resume-normal`/`resume-distributed` command after the old process exits; `--analyze-only latest` cannot reconstruct earlier checkpoint source logs.
 
 ## Completion interpretation
 
@@ -69,4 +71,4 @@ PY
 grep -R -F "test_file.py::ClassName::test_case" /path/to/latest --include='*.log'
 ```
 
-`failure_report.csv` contains failures, not every passing case. Absence from the CSV only means no failure row was extracted; confirm pass/skip from logs when needed.
+`failure_report.csv` contains failure observations/candidates, not a complete result database. In official recall-first mode it may include a case that later passed; absence only means no failure nodeid was extracted. Confirm final pass/skip from logs or use stable case reruns when needed.
