@@ -8,7 +8,9 @@ PYTORCH_ROOT=/path/to/pytorch
 ENV_SH=/path/to/environment.sh  # optional when the environment is already active
 ```
 
-## Ordinary full run
+## Direct pytest optional full run
+
+The default full-suite baseline is the complete official Normal plus Distributed queues below. Use this direct file full run for entry-point comparison or when uniform pytest logs are specifically required; use its prefix/list variants for normal incremental work.
 
 ```bash
 test -z "${ENV_SH:-}" || source "$ENV_SH"

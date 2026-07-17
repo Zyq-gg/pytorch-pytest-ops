@@ -25,7 +25,7 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
 ### Give a run command
 
 1. Identify the entry point and category: ordinary pytest, pytest subset, process-level file rerun, stable case rerun, official normal queue, or official distributed queue.
-   For a new unattended distributed full run, prefer the complete official queue; use lightweight `run-test-resume` only for exploration or compatibility with its existing work directories.
+   For a new full-suite baseline, default to both complete official queues: Normal and Distributed, with separate work directories and separate completion checks. Use direct pytest primarily for selected modules/files/cases, code-change incremental validation, failure reproduction, and stable-failure analysis; only present its full-file mode as an optional alternative. Use lightweight `run-test-resume` only for exploration or compatibility with its existing work directories.
 2. Include `source "$ENV_SH"` only when an environment script exists, and always create `$WORK`.
 3. For a long run, use `nohup env PYTHONUNBUFFERED=1 python3 -u ... > "$WORK/runner.out" 2>&1 &` and save `$!` to `runner.pid`.
 4. For a new run, include `--fresh`. For resume, use the same work directory and semantic parameters but remove `--fresh`.
@@ -73,6 +73,7 @@ For `pytest-failure-files`, include `--publish-to-work-dir <original-full-work-d
 - Do not start, stop, kill, resume, or overwrite a test run unless the user requests it. Status requests are read-only.
 - Before suggesting `--fresh`, distinguish a new work directory from a resume; `--fresh` discards checkpoint use.
 - Do not claim all PyTorch categories were covered by ordinary pytest. Distributed and official custom handlers use the official entry point.
+- Do not present direct pytest and the official queue as equal default full-suite choices. The official Normal plus Distributed queues are the default coverage baseline; direct pytest is the preferred precision/incremental tool and an optional ordinary-file full run.
 - Do not claim “no omissions” solely because a runner exited. Report the exact plan/checkpoint/missing/unresolved counts.
 - Prefer `grep -E` fallbacks because `rg` may be unavailable in runtime containers.
 - Treat runner source as newer than bundled examples. If flags differ, follow source and mention the discrepancy.

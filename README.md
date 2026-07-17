@@ -6,9 +6,9 @@
 
 PyTorch 测试并不只有一种入口。本项目所在环境同时使用：
 
-- 直接 `python3 -m pytest` 的普通文件队列
-- PyTorch 官方 `test/run_test.py` 队列
-- distributed-tests 专项队列
+- PyTorch 官方 `test/run_test.py` Normal 全量队列
+- PyTorch 官方 distributed-tests 全量队列
+- 直接 `python3 -m pytest` 的文件队列，用于子集、增量和问题复现，也保留可选全量能力
 - 普通 pytest 子集和历史失败文件补跑
 - case 级稳定失败重测
 
@@ -16,8 +16,8 @@ PyTorch 测试并不只有一种入口。本项目所在环境同时使用：
 
 ## 能做什么
 
-- 生成普通 pytest 全量、dry-run、子集和续跑命令
-- 生成官方 `run_test.py` normal/distributed 队列命令
+- 生成官方 `run_test.py` Normal/Distributed 全量、dry-run、续跑和补跑命令
+- 生成直接 pytest 文件全量、子集、增量和续跑命令
 - 根据已有 `failure_report.csv` 补跑文件级 timeout/crash
 - 生成稳定失败 case 重测命令
 - 保持自定义环境变量在首次运行和续跑之间一致
@@ -43,6 +43,8 @@ Workflow doc:   /workspace/pytorch-pytest-ops/docs/PYTORCH_PYTEST_WORKFLOW.md
 ```
 
 仓库中的 `runners/` 是可执行实现，skill 会先检查这些脚本源码和 `--help`，再生成命令。`docs/PYTORCH_PYTEST_WORKFLOW.md` 是与该版本 runner 配套的详细操作手册。
+
+当前默认定位是：以完整官方队列作为全量测试基线，Normal 和 Distributed 分别运行并分别验收；直接 pytest 文件队列作为辅助入口，主要用于按模块/文件/case 筛选、代码修改后的增量验证、timeout/crash 文件复现和稳定失败确认。直接 pytest 仍然可以跑它所发现的普通文件全量，但不能替代官方 custom handler，也不能单独声明完整 PyTorch 类别覆盖。
 
 运行测试仍需要目标机器上已有：
 
@@ -90,7 +92,7 @@ python3 scripts/self_check.py --pytorch-root /path/to/pytorch
 在请求中显式引用 skill：
 
 ```text
-使用 $pytorch-pytest-ops 给我一个普通 PyTorch 全量测试的 nohup 命令。
+使用 $pytorch-pytest-ops 给我官方队列 Normal 和 Distributed 全量测试命令。
 ```
 
 ```text
@@ -150,7 +152,17 @@ ENV_SH=/path/to/environment.sh  # 环境已激活时留空
 test -z "${ENV_SH:-}" || source "$ENV_SH"
 ```
 
-只生成普通 pytest 清单，不执行测试：
+推荐的全量基线先分别运行官方 Normal 和 Distributed。只生成官方 Normal 清单：
+
+```bash
+NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_normal \
+ENV_SH="$ENV_SH" PYTORCH_ROOT="$PYTORCH_ROOT" \
+bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" dry-run-normal
+```
+
+正式启动命令以及 Distributed 对应命令见工作流文档第 6、7 节；shell 包装器负责 nohup、checkpoint、自动不完整模块补跑和覆盖报告。
+
+下面是辅助的直接 pytest 文件入口。只生成文件清单，不执行测试：
 
 ```bash
 python3 "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
@@ -160,7 +172,7 @@ python3 "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
   --dry-run-only
 ```
 
-正式后台运行普通 pytest 全量：
+可选地正式后台运行直接 pytest 文件全量：
 
 ```bash
 WORK=/home/tmp/torch2.13/pytest_full
@@ -184,7 +196,7 @@ nohup env PYTHONUNBUFFERED=1 \
 echo $! > "$WORK/runner.pid"
 ```
 
-distributed-tests、子集、历史失败补跑和稳定失败重测命令见 `docs/PYTORCH_PYTEST_WORKFLOW.md`。新建无人值守 distributed 全量使用完整官方队列的 `run-distributed`；`run_pytorch_subset.py run-test-resume` 只作为轻量探索和旧目录兼容入口。
+官方 Normal/Distributed 全量、直接 pytest 子集、历史失败补跑和稳定失败重测命令见 `docs/PYTORCH_PYTEST_WORKFLOW.md`。新建无人值守全量应使用完整官方队列的 `run-normal` 和 `run-distributed`；`run_pytorch_subset.py run-test-resume` 只作为轻量探索和旧目录兼容入口。
 
 官方 `run_test.py` 队列还会生成：
 

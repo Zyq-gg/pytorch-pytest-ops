@@ -2,14 +2,14 @@
 
 本文档按仓库 `runners/` 最新脚本整理，命令示例基于当前容器环境。仓库可以 clone 到任意目录；其他环境先设置 `OPS_ROOT=/实际/clone/路径`，并把示例中的 `/workspace/pytorch-pytest-ops` 替换为 `$OPS_ROOT`。日志解析、报告生成和状态检查所需脚本均已包含在本仓库，不依赖旧的 `/workspace/torch_test` 或 `/home/tmp/python_and_sh` 解析脚本。
 
-本文按 2026-07-17 仓库最新 runner 行为重新核对。提供两套普通测试入口，但 distributed-tests 的新任务统一推荐第 7 节完整官方队列：
+本文按 2026-07-17 仓库最新 runner 行为重新核对。两套入口的默认定位如下：
 
-1. 直接 pytest 入口：第 2 节用 `run_pytorch_tests_prefix.py` 跑真实 `.py` 文件，再用第 7 节完整官方 distributed 队列补 distributed-tests。
-2. 官方入口：第 6 节用 `run_official_run_test_queue.py` 跑 normal 模块，第 7 节用同一队列跑 distributed 模块；shell 包装器是 `run_test-2.13-official-queue.sh`。
+1. 主全量入口：第 6 节用官方 `run_test.py` 队列跑 Normal，第 7 节用同一队列跑 Distributed；shell 包装器是 `run_test-2.13-official-queue.sh`。需要完整全量基线时两类都要运行并分别验收。
+2. 辅助直接 pytest 入口：第 2～4 节直接运行真实 `.py` 文件或具体 nodeid，主要用于模块/文件/case 筛选、代码修改后的增量测试、故障复现、历史失败补跑和稳定失败确认；它保留普通文件全量能力，但不是默认完整覆盖入口。
 
 第 5 节 `run-test-resume` 保留为旧目录兼容、探索和轻量备选。它有模块 checkpoint 和 case 报告，但没有完整队列的 idle watchdog、自动权威模块补跑、`module_status.csv`、`coverage_report.json` 与覆盖闭合判定，不作为新的无人值守 distributed 全量首选。
 
-直接 pytest 便于得到密集、统一的 pytest 日志；官方入口保留 custom handler 和官方 `--rs/--scs` 行为。不能只执行普通 pytest 命令就宣称覆盖了所有 PyTorch 测试类别。本文当前不把被明确排除的 JIT executor 测试算入普通全量；如需覆盖它，应按目标 executor 配置单独规划，不能简单删除排除参数后与普通 pytest 队列混跑。
+直接 pytest 便于得到密集、统一的日志，并能低成本精确运行改动相关文件或 case；官方入口保留 custom handler、官方模块参数和 `--rs/--scs` 行为，因此作为全量覆盖基线。不能只执行直接 pytest 命令就宣称覆盖了所有 PyTorch 测试类别。本文当前不把被明确排除的 JIT executor 测试算入默认全量；如需覆盖它，应按目标 executor 配置单独规划，不能简单删除排除参数后混跑。
 
 本文中的“不遗漏”不是假设命令启动后必然成功，而是要求可验证地满足：计划清单非空；每个计划文件/模块都在 checkpoint 中有终态；runner 已写最终 summary/report；没有遗留无法定位到 case 的 process-level timeout/crash。若最后一项不满足，文档会明确要求继续补跑或复现，而不会把它算作完整 case 级结果。
 
@@ -23,20 +23,22 @@
 
 ## 0. 总体选择
 
-当前推荐把测试分成四条主线：
+当前推荐按下面的优先级选择：
 
 | 场景 | 推荐入口 | 说明 |
 | --- | --- | --- |
-| 普通 pytest 全量 | `run_pytorch_tests_prefix.py` | 官方 dry-run 生成文件清单，直接 `python3 -m pytest` 跑文件，多 GPU 队列，timeout/crash 恢复与自动报告 |
-| 普通 pytest 子集/补跑 | `run_pytorch_subset.py pytest-list` / `pytest-failure-files` | 从已有清单或失败报告筛文件重跑 |
+| 官方全量基线 | `run_test-2.13-official-queue.sh` | Normal 和 Distributed 分开运行；保留 custom handler，具备 checkpoint、自动补跑和覆盖对账，见第 6、7 节 |
+| 直接 pytest 增量/子集 | `run_pytorch_tests_prefix.py` / `run_pytorch_subset.py pytest-list` | 按前缀、清单、正则或具体文件快速验证改动，复用 GPU 队列和 stepcurrent 恢复 |
+| 失败复现和稳定性确认 | `pytest-failure-files` / `rerun_stable_failures.py` | 补跑 timeout/crash 文件，或对具体 nodeid 连续重测 N 次 |
+| 直接 pytest 可选普通全量 | `run_pytorch_tests_prefix.py` | 可运行官方 dry-run 中有真实文件的普通集合，用于入口对比或需要统一 pytest 日志的场景，不覆盖 virtual/custom handler 和 distributed |
 | 轻量 official distributed 备选 | `run_pytorch_subset.py run-test-resume` | 兼容旧目录、探索；缺少完整覆盖闭合能力，见第 5 节 |
-| 官方 run_test.py 完整队列 | `run_test-2.13-official-queue.sh` | normal/distributed、子集、失败补跑、稳定失败、覆盖对账；见第 6、7 节 |
 
-完整组合的边界：
+覆盖边界：
 
-- 要覆盖官方 dry-run 识别的 normal custom handlers 和 distributed 类别，运行第 6 节 Normal 完整队列加第 7 节 Distributed 完整队列。这是“官方类别尽量完整”的推荐组合。
-- 要获得直接 pytest 的统一文件日志，运行第 2 节真实 `.py` 文件队列加第 7 节 Distributed 完整队列；但这套组合仍不包含第 2.2 节列出的 normal virtual/custom-handler 目标。需要这些目标时还要执行第 6 节，或者直接采用上一种完整官方组合。
+- 默认全量基线是第 6 节 Normal 完整队列加第 7 节 Distributed 完整队列。两边使用独立 work-dir、独立 checkpoint 和独立 coverage 验收。
+- 第 2 节直接 pytest 全量适合对照官方入口、获得统一文件日志或复用其 case 恢复能力；即使再加第 7 节 Distributed，也仍缺少 Normal virtual/custom-handler，不能代替默认全量基线。
 - 第 2 节和第 6 节会覆盖大量相同 normal Python 测试，但入口、环境和 handler 行为不同。做入口对比时应使用独立 work-dir，不能合并 checkpoint。
+- 修改代码后的日常回归优先从第 3 节筛选受影响文件；已有失败 CSV 时从第 3.3 或第 4 节开始，不需要每次重新跑全量。
 
 稳定失败重测使用：
 
@@ -48,14 +50,14 @@
 
 | 文件 | 当前用途 |
 | --- | --- |
-| `run_pytorch_tests_prefix.py` | 普通 pytest 主入口，当前推荐 |
-| `run_pytorch_subset.py` | pytest 子集、历史 process-level 文件补跑、官方 run_test.py 单次或可恢复运行 |
-| `rerun_stable_failures.py` | 对 case 级失败做 N 次稳定性确认 |
-| `run_official_run_test_queue.py` / `run_test-2.13-official-queue.sh` | 官方 run_test.py 完整队列及其 shell 包装器 |
+| `run_official_run_test_queue.py` / `run_test-2.13-official-queue.sh` | 默认全量入口：官方 Normal/Distributed 队列及其 shell 包装器 |
+| `run_pytorch_tests_prefix.py` | 直接 pytest 文件队列：前缀增量测试和可选普通文件全量 |
+| `run_pytorch_subset.py` | pytest 清单筛选、历史 process-level 文件补跑、官方 run_test.py 单次或轻量可恢复运行 |
+| `rerun_stable_failures.py` | 对 case 级失败做 N 次稳定性确认，支持直接 pytest 或 official runner |
 | `run_pytorch_tests_gpuid.py` | 较早的普通 pytest runner，不含当前完整恢复链路 |
 | `analyze_pytest_*.py` / `pytorch_pytest_*.py` | 历史解析或 tmux 方案，新流程不以它们为主入口 |
 
-新任务应先选定“直接 pytest”或“官方队列”普通入口，并在同一个 work-dir 内保持不变；distributed 新任务使用第 7 节。第 5 节轻量 distributed 和第 7 节完整 distributed 的 checkpoint/报告语义不同，不能复用同一目录。
+新的全量任务默认执行第 6、7 节官方队列；只有明确需要统一 pytest 文件日志、入口对比或增量筛选时才选择第 2～4 节。任何任务都应在同一个 work-dir 内保持入口和环境不变。第 5 节轻量 distributed 和第 7 节完整 distributed 的 checkpoint/报告语义不同，不能复用同一目录。
 
 ## 1. 环境验证
 
@@ -145,9 +147,11 @@ tr '\0' '\n' < "/proc/$PID_TO_CHECK/environ" | grep '^TORCHINDUCTOR_CPP_MARCH='
 
 不要为了单次任务修改脚本里的 `DEFAULT_TEST_ENV`；那会变成所有任务的隐式默认值，不利于结果追踪。
 
-## 2. 普通 Pytest 全量测试：run_pytorch_tests_prefix.py
+## 2. 直接 Pytest 文件队列：可选全量测试
 
 ### 2.1 这个脚本做什么
+
+该入口保留普通文件全量能力，方便对比官方入口或获得统一 pytest 日志；日常定位主要用于第 3 节的前缀/文件子集和第 4 节稳定失败重测。默认完整全量基线请使用第 6、7 节官方队列。
 
 入口：
 
@@ -246,7 +250,7 @@ inductor/test_distributed_patterns.py
 
 ### 2.3 正式全量后台运行
 
-下面命令可以直接在本容器运行。普通全量明确排除 distributed-tests，随后必须执行第 7 节的完整 distributed 命令补齐该类别。
+下面命令可以直接在本容器运行。它是可选的直接 pytest 普通文件全量，明确排除 distributed-tests，也无法执行 virtual/custom-handler；需要完整全量基线时应改用第 6、7 节，而不是只在此命令后补 distributed。
 
 ```bash
 source /home/tmp/python_and_sh/env.sh
@@ -608,7 +612,7 @@ NMZ: /home/tmp/torch2.13/log-final/pytest_full_nmz/unresolved_after_stepcurrent_
 
 正式命令采用 14400 秒文件 timeout；中断续跑必须保留该环境变量、输入 CSV、timeout 和 work-dir，并去掉 `--fresh`。
 
-## 3. 普通 Pytest 子集和补跑
+## 3. 直接 Pytest 子集、增量测试和补跑
 
 本节三个入口都以“选中的测试文件”为调度粒度。判断“不遗漏”统一使用三层标准：选中清单非空、清单中的每个文件都在 checkpoint 中有终态、最终报告不存在尚未解决的 process-level `<timeout>/<crash>`。前两项保证文件被调度，第三项才表示得到了完整 case 级结论。
 
@@ -1397,7 +1401,7 @@ ps -ef | grep -E 'run_pytorch_subset.py run-test|run_test.py' | grep -v grep
 
 进程结束后，`summary.json` 的 `returncode: 0` 表示官方命令成功，非 0 表示失败。该模式没有 checkpoint，中断后只能重新执行整个命令，不能从中断模块继续。`run-test-resume` 比它多模块 checkpoint、模块失败列表和 case 报告，但新建长时间 distributed 全量仍应使用第 7 节完整队列，因为还需要 idle watchdog、自动模块补跑和 coverage 闭合。
 
-## 6. 官方 run_test.py 队列模式：Normal 完整入口
+## 6. 官方 run_test.py 队列模式：Normal 主全量入口
 
 ### 6.1 功能、入口和与直接 pytest 的区别
 
@@ -1408,7 +1412,7 @@ ps -ef | grep -E 'run_pytorch_subset.py run-test|run_test.py' | grep -v grep
 /workspace/pytorch-pytest-ops/runners/run_official_run_test_queue.py
 ```
 
-队列以官方 dry-run 模块名为单位，逐模块执行：
+这是当前默认的 Normal 全量入口。队列以官方 dry-run 模块名为单位，逐模块执行：
 
 ```text
 python3 run_test.py --include <module> --exclude-jit-executor --exclude-distributed-tests --verbose
@@ -1739,7 +1743,7 @@ PY
 
 失败候选先查最终 CSV；通过/跳过及官方重试后的最终状态查 `latest/run_test_gpu_*.log`。官方 CSV 采用召回优先，既不是全 case 数据库，也不保证每一行都是连续稳定失败；稳定性结论看 6.9。
 
-## 7. 官方 run_test.py 队列模式：Distributed 完整入口
+## 7. 官方 run_test.py 队列模式：Distributed 主全量入口
 
 ### 7.1 与 Normal 的关键差异
 
