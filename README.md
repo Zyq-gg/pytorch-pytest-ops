@@ -26,6 +26,7 @@ PyTorch 测试并不只有一种入口。本项目所在环境同时使用：
 - 官方队列续跑时复用历史时间戳目录中已有具体 case 的 FAIL，只重跑无报告 FAIL、TIMEOUT 和缺 checkpoint 模块
 - 区分文件级 unresolved 与已经定位到 nodeid 的 case 级 Crash/Timeout
 - 查询某个 case 的失败记录和原始日志
+- 召回优先合并官方稳定失败清单与 pytest `FAILED nodeid`，避免异常结束前已出现的失败 case 被遗漏
 - 给出下一步应运行的精确命令
 
 ## 与测试脚本的关系

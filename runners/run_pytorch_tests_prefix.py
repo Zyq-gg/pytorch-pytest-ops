@@ -1591,10 +1591,53 @@ def find_run_test_failure_window(lines: list[str], nodeid: str) -> tuple[int, st
     return best_idx + 1, "\n".join(lines[start:end])
 
 
+def find_run_test_case_window(lines: list[str], nodeid: str, failure_idx: int) -> str:
+    """Return the pytest session/case block associated with one official failure."""
+    if failure_idx < 0:
+        return ""
+
+    session_start = -1
+    for idx in range(failure_idx, -1, -1):
+        if "test session starts" in lines[idx]:
+            session_start = idx
+            break
+    if session_start < 0:
+        return ""
+
+    case_start = session_start
+    variants = (nodeid, f"test/{nodeid}")
+    for idx in range(session_start, failure_idx + 1):
+        line = strip_distributed_log_prefix(lines[idx])
+        running = RUNNING_ITEMS_RE.search(line)
+        if running and any(variant in running.group(1) for variant in variants):
+            case_start = idx
+            break
+        if any(line.startswith(variant) for variant in variants):
+            case_start = idx
+            break
+
+    session_end = len(lines)
+    for idx in range(failure_idx + 1, len(lines)):
+        if "test session starts" in lines[idx]:
+            session_end = idx
+            break
+
+    # FAILED CONSISTENTLY is emitted immediately after the final retry session.
+    # Do not let a later session contribute an unrelated exception or crash.
+    if "FAILED CONSISTENTLY:" in lines[failure_idx]:
+        session_end = min(session_end, failure_idx + 1)
+    return "\n".join(lines[case_start:session_end])
+
+
 def parse_official_run_test_failure(nodeid: str, source_log: str, text: str) -> dict[str, str]:
     lines = strip_ansi(text).splitlines()
     line_no, window = find_run_test_failure_window(lines, nodeid)
-    error = concise_run_test_error(window)
+    case_window = find_run_test_case_window(lines, nodeid, line_no - 1)
+    error = concise_run_test_error(case_window) if case_window else ""
+    if not error:
+        # Keep the broad historical heuristic as a recall-first fallback for
+        # custom handlers and incomplete logs without normal pytest boundaries.
+        error = concise_run_test_error(window)
     error_type, error_message = split_error_loose(error)
     test_file, class_name, case_name, case_params = split_nodeid(nodeid)
     raw = f"FAILED: test/{nodeid}"
@@ -1847,8 +1890,11 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
         summary_rows = extract_pytest_summary_failures(text, log_file, official=is_official)
         timeout_rows = extract_official_timeout_current_failures(text, log_file) if is_official else []
         if is_official:
-            parsed_rows = official_rows if official_rows else summary_rows
-            parsed_rows = parsed_rows + timeout_rows
+            # Stable run_test.py summaries are authoritative, but a shared
+            # worker log can also contain a different module that terminated
+            # before producing its final summary. Keep pytest nodeids as a
+            # recall-first fallback instead of dropping the whole category.
+            parsed_rows = official_rows + summary_rows + timeout_rows
         else:
             parsed_rows = summary_rows
         has_case_rows = any("::" in row.get("nodeid", "") for row in parsed_rows)
