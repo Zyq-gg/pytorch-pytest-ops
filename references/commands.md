@@ -1,16 +1,18 @@
-# Command Templates
+# 命令模板
 
-Always inspect current `--help` before using these templates. Resolve these variables first:
+使用模板前，必须先检查当前脚本的 `--help`。先确定以下变量：
 
 ```bash
 OPS_ROOT=/path/to/cloned/pytorch-pytest-ops
 PYTORCH_ROOT=/path/to/pytorch
-ENV_SH=/path/to/environment.sh  # optional when the environment is already active
+ENV_SH=/path/to/environment.sh  # 环境已经激活时可以留空
 ```
 
-## Direct pytest optional full run
+续跑必须保持 work-dir、测试选择参数、GPU、timeout 和自定义环境变量不变。新任务使用 `--fresh`；续跑同一目录时移除 `--fresh`。
 
-The default full-suite baseline is the complete official Normal plus Distributed queues below. Use this direct file full run for entry-point comparison or when uniform pytest logs are specifically required; use its prefix/list variants for normal incremental work.
+## 直接 pytest 可选文件全量
+
+默认全量基线是后文的官方 Normal 与 Distributed 两套完整队列。只有需要比较测试入口或统一使用 pytest 日志时，才使用下面的 direct pytest 文件全量；日常增量验证优先使用其前缀或清单子集模式。
 
 ```bash
 test -z "${ENV_SH:-}" || source "$ENV_SH"
@@ -36,12 +38,14 @@ nohup env PYTHONUNBUFFERED=1 \
 echo $! > "$WORK/runner.pid"
 ```
 
-Resume with the same command and work directory, remove `--fresh`, and normally write to `runner_resume.out`.
+续跑时复用同一条命令和 work-dir，移除 `--fresh`，通常把输出改为 `runner_resume.out`，并用新的 `$!` 更新 `runner.pid`。当前 direct runner 默认会重试 checkpoint 中的 FAIL；只有显式传入 `--skip-fail` 才会跳过旧失败。
 
-## Dry-run only
+## 只生成 dry-run 清单
 
 ```bash
 test -z "${ENV_SH:-}" || source "$ENV_SH"
+
+mkdir -p "$WORK"
 python3 "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
   "$PYTORCH_ROOT" \
   --work-dir "$WORK" \
@@ -49,13 +53,18 @@ python3 "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
   --dry-run-only
 ```
 
-This creates `$WORK/test_files.txt` and does not execute tests.
+该命令只生成 `$WORK/test_files.txt`，不执行测试 case。direct runner 默认向官方 dry-run 追加 `--exclude-jit-executor --exclude-distributed-tests`。
 
-## Prefix subset
+## 按前缀运行子集
 
 ```bash
-nohup env PYTHONUNBUFFERED=1 python3 -u \
-  "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
+test -z "${ENV_SH:-}" || source "$ENV_SH"
+
+WORK=/path/to/prefix-work-dir
+mkdir -p "$WORK"
+
+nohup env PYTHONUNBUFFERED=1 \
+  python3 -u "$OPS_ROOT/runners/run_pytorch_tests_prefix.py" \
   "$PYTORCH_ROOT" \
   --work-dir "$WORK" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
@@ -67,14 +76,22 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
   --process-rerun \
   --process-rerun-error-types Timeout,Crash \
   --process-rerun-timeout 14400 \
-  --fresh > "$WORK/runner.out" 2>&1 &
+  --fresh \
+  > "$WORK/runner.out" 2>&1 &
+
+echo $! > "$WORK/runner.pid"
 ```
 
-## Existing-list subset
+## 从已有清单运行子集
 
 ```bash
-nohup env PYTHONUNBUFFERED=1 python3 -u \
-  "$OPS_ROOT/runners/run_pytorch_subset.py" pytest-list \
+test -z "${ENV_SH:-}" || source "$ENV_SH"
+
+WORK=/path/to/subset-work-dir
+mkdir -p "$WORK"
+
+nohup env PYTHONUNBUFFERED=1 \
+  python3 -u "$OPS_ROOT/runners/run_pytorch_subset.py" pytest-list \
   "$PYTORCH_ROOT" \
   --test-list /path/to/test_files.txt \
   --include-prefix inductor/,dynamo/ \
@@ -84,14 +101,25 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
   --recovery-case-timeout 600 \
   --recovery-attempts 3 \
   --recovery-max-total-time 7200 \
-  --fresh > "$WORK/runner.out" 2>&1 &
+  --fresh \
+  > "$WORK/runner.out" 2>&1 &
+
+echo $! > "$WORK/runner.pid"
 ```
 
-## Process-level failure files with publication
+`pytest-list` 还支持 `--exclude-prefix`、`--include-regex` 和 `--exclude-regex`。它复用 direct runner 的 GPU 队列、stepcurrent 和 crash 恢复实现。
+
+## 补跑 process-level 失败文件并发布
 
 ```bash
-nohup env PYTHONUNBUFFERED=1 python3 -u \
-  "$OPS_ROOT/runners/run_pytorch_subset.py" pytest-failure-files \
+test -z "${ENV_SH:-}" || source "$ENV_SH"
+
+BASE=/path/to/original-full-work-dir
+WORK=/path/to/supplemental-rerun-work-dir
+mkdir -p "$WORK"
+
+nohup env PYTHONUNBUFFERED=1 \
+  python3 -u "$OPS_ROOT/runners/run_pytorch_subset.py" pytest-failure-files \
   "$PYTORCH_ROOT" \
   --failure-csv "$BASE/latest/unresolved_process_failures.csv" \
   --work-dir "$WORK" \
@@ -102,37 +130,51 @@ nohup env PYTHONUNBUFFERED=1 python3 -u \
   --recovery-case-timeout 600 \
   --recovery-attempts 3 \
   --recovery-max-total-time 7200 \
-  --fresh > "$WORK/runner.out" 2>&1 &
+  --fresh \
+  > "$WORK/runner.out" 2>&1 &
+
+echo $! > "$WORK/runner.pid"
 ```
 
-For a completed supplemental run that only needs publication, reuse the same arguments, remove `--fresh`, add `--skip-fail`, and run in the foreground.
+发布只会在所选文件都有终态 checkpoint、补跑 summary 存在且 unresolved 数为 0 时执行。发布成功后，原全量目录的 `latest/external_rerun_merge.json` 会记录合并来源，使以后运行 `--analyze-only` 时能够重新应用该结果。
 
-## Stable failures
+如果补跑已经完成、只需重新发布，请复用相同参数，移除 `--fresh`，增加 `--skip-fail`，并以前台方式执行。
+
+## 稳定失败 case 重测
 
 ```bash
-nohup env PYTHONUNBUFFERED=1 python3 -u \
-  "$OPS_ROOT/runners/rerun_stable_failures.py" \
+test -z "${ENV_SH:-}" || source "$ENV_SH"
+
+WORK=/path/to/stable-rerun-work-dir
+mkdir -p "$WORK"
+
+nohup env PYTHONUNBUFFERED=1 \
+  python3 -u "$OPS_ROOT/runners/rerun_stable_failures.py" \
   "$PYTORCH_ROOT" /path/to/failure_report.csv \
   --attempts 3 \
   --timeout 600 \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --output-dir "$WORK" \
   > "$WORK/runner.out" 2>&1 &
+
+echo $! > "$WORK/runner.pid"
 ```
 
-Inspect current `--help` for generic CSV column filters before supplying filter arguments.
+默认跳过没有具体 `::case` 的 process-level 行。某个 case 一旦 PASS 就停止继续尝试；只有连续达到 `--attempts` 次且从未 PASS，才写入 `stable_failures.csv`。需要按 CSV 任意列筛选时，先查看当前 `--help` 中的 `--filter-column`、`--filter-equals`、`--filter-contains` 和 `--filter-regex`。
 
-## Official distributed resume
+## 轻量官方 Distributed 续跑
 
-Use the current documented command from the distributed section of `$OPS_ROOT/docs/PYTORCH_PYTEST_WORKFLOW.md`, then verify flags against:
+轻量兼容入口使用：
 
 ```bash
 python3 "$OPS_ROOT/runners/run_pytorch_subset.py" run-test-resume --help
 ```
 
-Keep official `run_test.py` arguments after `--`. Use the same work directory and remove the fresh/reset option on resume.
+完整命令以 `$OPS_ROOT/docs/PYTORCH_PYTEST_WORKFLOW.md` 的 distributed 章节为准。官方 `run_test.py` 参数必须放在 `--` 之后。续跑时保持同一 work-dir 和相同官方参数，并移除 `--fresh`。
 
-## Complete official normal queue
+该入口是串行模块队列，没有完整官方队列的 idle watchdog、自动完整模块补跑、`module_status.csv` 和 `coverage_report.json`，不应作为新的无人值守全量首选。
+
+## 完整官方 Normal 队列
 
 ```bash
 ENV_SH="$ENV_SH" \
@@ -147,13 +189,36 @@ PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-normal
 ```
 
-Resume with `resume-normal`. Require root `summary.json`, the latest completed `process_module_rerun*/summary.json` when selected, no unresolved rows, and `coverage_report.json.coverage_complete == true`. `completed_records == planned` is insufficient because TIMEOUT also has a checkpoint record.
+包装器会在后台启动 runner，并在终端打印 PID 和日志路径；当前脚本不会自动写 `runner.pid`。正常续跑使用 `resume-normal`，并保持上述环境变量不变。
 
-Current official queue resume preserves reliable historical FAIL reports across timestamp directories. Startup reports `Done FAIL: N (reuse X, retry Y)`; `Need run` contains unreported FAIL, TIMEOUT, and MISSING modules, not every old FAIL. The final report keeps historical `source_log` values for reused modules and replaces every old row for modules executed during the resume.
+验收至少要求：
 
-Running Python processes do not reload parser updates. After they exit, execute the same resume action against the same work directory. If startup reports `Need run: 0`, no modules are rerun; checkpoint `source_log` entries are reparsed and the cross-timestamp final reports/coverage are rebuilt.
+- 根目录 `summary.json` 存在；
+- 被触发的最后一个 `process_module_rerun*/summary.json` 存在；
+- `latest/failure_report.csv` 和 unresolved 报告存在；
+- unresolved 没有数据行；
+- `coverage_report.json.coverage_complete` 为 `true`。
 
-## Complete official distributed queue
+`completed_records == planned` 不能替代 coverage 验收，因为 TIMEOUT 也会写入 checkpoint。
+
+官方队列 resume 会保留跨时间戳的可靠 FAIL 报告。启动输出中的 `Done FAIL: N (reuse X, retry Y)` 表示：已有具体 case 的 FAIL 直接复用；无可靠 case 的 FAIL、TIMEOUT 和 MISSING 进入 `Need run`。本轮执行过的模块会用新报告整体替换旧行，未重跑模块保留 checkpoint 中的历史 `source_log`。
+
+当前 runner 有一个已知边界：当普通 `resume-normal` 计算出 `Need run: 0` 时，仍会调用空执行队列并触发 `ValueError: max_workers must be greater than 0`，因此不能依靠该动作做纯报告重建。现版本需要只补跑不完整模块或只重建报告时，使用：
+
+```bash
+ENV_SH="$ENV_SH" \
+PYTORCH_ROOT="$PYTORCH_ROOT" \
+NORMAL_WORK_DIR="$WORK" \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+PROCESS_RERUN_TIMEOUT=259200 \
+PROCESS_RERUN_IDLE_TIMEOUT=7200 \
+PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
+bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" rerun-incomplete-normal
+```
+
+该动作对应 `--process-rerun-only`：它会从模块开头重跑已有 checkpoint 的 TIMEOUT、unresolved process failure，以及没有可靠 case 报告的 FAIL；它不会补跑完全缺少 checkpoint 的 MISSING 模块。没有符合补跑条件的模块时，它只从 checkpoint 权威日志重建最终报告、coverage 和根 summary。若目录仍有 MISSING，应使用普通 `resume-normal`，此时 `Need run` 非零，不会触发空队列问题。
+
+## 完整官方 Distributed 队列
 
 ```bash
 ENV_SH="$ENV_SH" \
@@ -168,18 +233,48 @@ PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-distributed
 ```
 
-The distributed action uses one `--no-bind-gpu` worker and inherits every device visible inside the container. Do not run another container against the same GPUs when stable distributed results matter.
+Distributed 动作使用单个 `--no-bind-gpu` worker，不改写 GPU 可见性，因此继承容器内可见的全部设备。需要稳定结果时，不要让其他容器同时使用同一批 GPU。
 
-The default official profile terminates after 2 hours without subprocess output and also retains a 72-hour hard limit. Override `IDLE_TIMEOUT`/`PROCESS_RERUN_IDLE_TIMEOUT` for legitimate silent cases, and override `TIMEOUT`/`PROCESS_RERUN_TIMEOUT` for the absolute limit. A timed-out historical module is restarted from its beginning by `rerun-incomplete-normal` or `rerun-incomplete-distributed`.
+默认官方配置同时启用两个 watchdog：
 
-## Custom environment variables
+- 连续 2 小时没有子进程输出时终止模块；
+- 单模块 72 小时 hard wall-clock 上限。
 
-Put variables after `nohup env`, for example:
+合法的长时间静默模块可以调整 `IDLE_TIMEOUT`/`PROCESS_RERUN_IDLE_TIMEOUT`；绝对上限使用 `TIMEOUT`/`PROCESS_RERUN_TIMEOUT`。被外层 timeout 终止的历史模块会由 `rerun-incomplete-distributed` 从模块开头重新运行，不保证从旧的随机 stepcurrent shard 百分比继续。
+
+普通续跑使用 `resume-distributed`。如果只需补跑不完整模块或重建报告，应使用：
+
+```bash
+ENV_SH="$ENV_SH" \
+PYTORCH_ROOT="$PYTORCH_ROOT" \
+DIST_WORK_DIR="$WORK" \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+PROCESS_RERUN_TIMEOUT=259200 \
+PROCESS_RERUN_IDLE_TIMEOUT=7200 \
+PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
+bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" rerun-incomplete-distributed
+```
+
+它同样避开普通 resume 在 `Need run: 0` 时的当前空队列限制。
+
+## 自定义环境变量
+
+直接调用 Python runner 时，把变量放在 `nohup env` 后，例如：
 
 ```bash
 nohup env PYTHONUNBUFFERED=1 TORCHINDUCTOR_CPP_MARCH=znver1 python3 -u ...
 ```
 
-Use identical values for discovery, initial execution, automatic reruns, and resumes.
+dry-run、首次运行、自动补跑和续跑必须使用完全相同的自定义变量。比较不同配置时必须使用不同 work-dir。
 
-`TORCHINDUCTOR_CPP_MARCH` changes Inductor C++ compilation (`-march=native` versus the requested target). Use it only for an explicitly named configuration, use a separate work directory, and never change it midway through resume/rerun publication.
+`TORCHINDUCTOR_CPP_MARCH` 会改变 Inductor C++ 编译目标，例如从 `-march=native` 改为指定目标。它只应在明确命名的配置中使用，且不能在同一 work-dir 的续跑或发布过程中途改变。
+
+当前 runner 会在继承外部环境后强制写入以下内置默认值，因此外部同名变量不会覆盖它们：
+
+```text
+PYTORCH_TEST_WITH_ROCM=1
+CONTINUE_THROUGH_ERROR=True
+MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC=1
+```
+
+这套 runner 当前面向 ROCm 测试环境；迁移到 CUDA 或 CPU 环境前应先检查并调整源码中的默认环境策略。

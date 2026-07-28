@@ -1619,7 +1619,7 @@ Need run:     46
 
 最终报告按模块合并历史和本次日志：本次重跑模块的旧行会被删除并由新结果替换；没有重跑的可靠 FAIL 保留原 `source_log`。这样既避免无意义重跑，也不会把半截旧日志与新日志混成重复 case。显式传 `--skip-fail` 时仍会跳过所有旧 FAIL/TIMEOUT，主要用于只关心未运行模块的特殊场景，不作为完整最终报告的默认选择。
 
-runner 代码或解析器升级不会改变已经启动的 Python 进程。旧进程结束后若要应用新解析规则，先确认没有同目录 runner，再用相同目录执行一次 `resume-normal`。当启动信息显示 `Need run: 0` 时不会重跑模块，而会从 checkpoint 的历史 `source_log` 重建跨时间戳最终报告；若仍有无报告 FAIL、TIMEOUT 或 MISSING，则这些不完整模块会按正常 resume 规则执行。不要只对当前 `latest` 使用通用 `--analyze-only` 来替代这一步，因为可靠 FAIL 可能来自更早 timestamp。
+runner 代码或解析器升级不会改变已经启动的 Python 进程。旧进程结束后若要应用新解析规则，先确认没有同目录 runner。若仍有无报告 FAIL、TIMEOUT 或 MISSING，使用相同目录执行 `resume-normal`，这些模块会进入非空执行队列。当前版本有一个已知边界：普通 resume 计算出 `Need run: 0` 后仍会创建空线程池并报 `ValueError: max_workers must be greater than 0`；此时应改用 `rerun-incomplete-normal`，通过 `--process-rerun-only` 从 checkpoint 的历史 `source_log` 重建跨时间戳最终报告。不要只对当前 `latest` 使用通用 `--analyze-only` 来替代这一步，因为可靠 FAIL 可能来自更早 timestamp。
 
 确认模块不遗漏：
 
@@ -1822,7 +1822,7 @@ distributed 同样只在整个模块结束时更新 checkpoint。`test_c10d_nccl
 
 把 6.6 对账脚本的 work-dir 改成 distributed 目录。正常结束必须 summary/report 完整，并且 `coverage_report.json` 同时满足 `missing: 0`、`timeout: 0`、`unresolved_process_failures: 0`、`coverage_complete: true`。只看到 `.run_test_progress.json` 已有全部模块记录仍不够，因为其中可能包含 `TIMEOUT`。
 
-解析器升级后重建跨时间戳 distributed 报告也使用同目录 `resume-distributed`，并且必须等旧进程结束。启动显示 `Need run: 0` 时只读取 checkpoint 的历史 `source_log` 并重建报告；有不完整模块时会先补齐再收尾。
+解析器升级后重建跨时间戳 distributed 报告必须先等旧进程结束。有无可靠 case 的 FAIL、TIMEOUT 或 MISSING 时，使用同目录 `resume-distributed` 先补齐再收尾。若普通 resume 计算出 `Need run: 0`，当前版本会触发空线程池错误，应改用 `rerun-incomplete-distributed` 从 checkpoint 的历史 `source_log` 重建报告。
 
 ### 7.4 Distributed 子集
 
@@ -1984,7 +1984,7 @@ python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
 
 对第 6/7 节完整官方队列，不要把只扫描当前 `latest` 的 `--analyze-only` 当成完整重建：可靠 FAIL 可能来自更早的 timestamp，而当前 checkpoint 的 `source_log` 才是每个模块的权威来源。
 
-应用新版解析器的完整做法是：先确认旧 runner 已结束、目标仓库已更新，再对同一个 work-dir 使用原语义参数执行 `resume-normal` 或 `resume-distributed`。runner 会读取所有 checkpoint source log；`Need run: 0` 时不执行测试，只重建 failure/unresolved、module status、coverage 和根 summary；存在无报告 FAIL、TIMEOUT 或 MISSING 时会先执行必要模块。示例：
+应用新版解析器的完整做法是：先确认旧 runner 已结束、目标仓库已更新。存在无报告 FAIL、TIMEOUT 或 MISSING 时，对同一个 work-dir 使用原语义参数执行 `resume-normal` 或 `resume-distributed`，先运行非空必要模块队列。若所有模块已有可复用终态、只需重建 failure/unresolved、module status、coverage 和根 summary，当前版本应使用 `rerun-incomplete-normal` 或 `rerun-incomplete-distributed`；普通 resume 在 `Need run: 0` 时存在空线程池错误。下面是纯重建/已有 checkpoint 不完整模块补跑示例：
 
 ```bash
 # Normal
@@ -1992,22 +1992,20 @@ ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 NORMAL_WORK_DIR=/home/tmp/torch2.13/run_test_official_nmz \
 GPU_IDS=0,1,2,3,4,5,6,7 \
-TIMEOUT=259200 IDLE_TIMEOUT=7200 \
 PROCESS_RERUN_TIMEOUT=259200 PROCESS_RERUN_IDLE_TIMEOUT=7200 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
-bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-normal
+bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh rerun-incomplete-normal
 
 # Distributed
 ENV_SH=/home/tmp/python_and_sh/env.sh \
 PYTORCH_ROOT=/workspace/pytorch \
 DIST_WORK_DIR=/home/tmp/torch2.13/run_test_official_distributed_nmz \
-TIMEOUT=259200 IDLE_TIMEOUT=7200 \
 PROCESS_RERUN_TIMEOUT=259200 PROCESS_RERUN_IDLE_TIMEOUT=7200 \
 PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
-bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh resume-distributed
+bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh rerun-incomplete-distributed
 ```
 
-只想补跑当前 unresolved/TIMEOUT 而不扫描 MISSING 主队列时，才使用 `rerun-incomplete-normal` 或 `rerun-incomplete-distributed`。最后仍以根目录 `coverage_report.json` 验收。
+`rerun-incomplete-*` 会补跑已有 checkpoint 的 TIMEOUT、unresolved process failure 和无可靠 case 报告的 FAIL，但不会补跑完全缺少 checkpoint 的 MISSING。存在 MISSING 时仍要使用普通 resume；此时 `Need run` 非零，不会触发空队列问题。最后仍以根目录 `coverage_report.json` 验收。
 
 ### 8.3 停止跑错的后台任务
 
