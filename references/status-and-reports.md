@@ -29,16 +29,17 @@ ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 - `FINALIZED_INCOMPLETE`：根 summary/report 已生成，但仍存在 unresolved、timeout、真实 missing 或补跑 summary 缺失；
 - `NOT_FINALIZED`：必要的最终制品尚未生成。
 
-这里的 `Artifact verdict` 只描述磁盘制品。当前实现会另外列出 `Local work-dir procs`，但活动进程不会自动把 `COMPLETE` 改成 incomplete。因此最终宣布任务结束前，仍必须单独确认实际执行机器上没有相关进程。
+`Artifact verdict` 只描述磁盘制品；`Run verdict` 还会纳入本机活动进程。制品已经闭合但本机仍有同 work-dir runner 时，前者可以是 `COMPLETE`，后者会是 `RUNNING`。进程检查只覆盖当前机器，因此最终宣布任务结束前仍要在实际执行节点确认。
 
-对于已经产生 `.test_progress.json` 的普通 direct pytest 目录，检查器会把五个已知官方 virtual/custom-handler 目标与真实 missing 文件分开。纯 dry-run 目录还没有 progress 时，当前检查器可能把模式显示为 `unknown`，并且 direct `test_files.txt` 可能不会被识别；此时直接检查清单文件即可。
+对于普通 direct pytest 目录，检查器会把五个已知官方 virtual/custom-handler 目标与真实 missing 文件分开；纯 dry-run 目录还没有 progress 时，也会根据 direct/official 清单文件识别模式。
 
-`Legacy/version hints` 用于提示旧恢复输出、旧 summary 元数据，或 failure report 在根 summary 之后被重新生成。
+`Legacy/version hints` 用于提示旧恢复输出、旧 summary 元数据、failure report 在根 summary 之后被重新生成，或旧 checkpoint 缺少可验证的运行清单。
 
 ## 普通 direct pytest 输出
 
 - `test_files.txt`：官方 dry-run 解析出的原始计划，尚未过滤没有真实文件的 virtual 目标；
 - `.test_progress.json`：文件级 checkpoint，主要读取 `tests`、`stats` 和 `updated`；
+- `.run_manifest.json`：计划、PyTorch 源码、关键环境和语义参数的不可逆指纹；续跑前用于拒绝误复用；
 - `<timestamp>/gpu_*.log`：各 GPU worker 日志；
 - `latest`：指向当前/最近 timestamp 的符号链接；
 - `latest.txt`：无法创建 `latest` 符号链接时的回退记录；
@@ -55,6 +56,7 @@ ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 - `run_test_tests.txt`：完整官方队列的模块计划；
 - `run_test_modules.txt`：轻量 `run-test-resume` 使用的模块计划；
 - `.run_test_progress.json`：模块 checkpoint，记录最新状态、elapsed、timeout 类型、`source_log` 和各次 attempt history；
+- `.run_manifest.json`：官方计划、源码、关键环境和语义参数的不可逆指纹；
 - `<timestamp>/run_test_gpu_*.log`：Normal 合并 worker 日志；
 - `<timestamp>/run_test_gpu_all.log`：Distributed 单 worker 日志；
 - `<timestamp>/process_module_rerun*/`：权威的完整模块补跑日志和 summary；
@@ -105,20 +107,18 @@ ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 
 checkpoint 只在整个官方模块返回后更新。单个大模块运行期间，progress 数小时不变化并不一定是卡住；应同时查看当前 worker 日志的 mtime、文件大小和最近的 case/session 输出。
 
-当前版本有一个重要限制：普通 `resume-normal`/`resume-distributed` 在计算出 `Need run: 0` 时仍会创建空线程池并报：
+普通 `resume-normal`/`resume-distributed` 在 `Need run: 0` 时不会创建空线程池，而是直接使用 checkpoint 的权威日志重建 failure/unresolved、module status、coverage 和根 summary。解析器升级后需要纯重建报告时，可以直接使用相同语义参数正常 resume。
 
-```text
-ValueError: max_workers must be greater than 0
-```
-
-因此解析器升级后需要跨 timestamp 重建报告，或只想补跑不完整模块时，当前版本应使用：
+只想重跑已有 checkpoint 中的不完整模块时，使用：
 
 ```text
 rerun-incomplete-normal
 rerun-incomplete-distributed
 ```
 
-这两个包装器动作使用 `--process-rerun-only`，不会进入空的首次执行队列；它会读取现有计划、checkpoint 和 `latest`，补跑已有 checkpoint 的 TIMEOUT、unresolved process failure 或无可靠 case 报告的 FAIL，然后重建 failure/unresolved、module status、coverage 和根 summary。它不会补跑完全缺少 checkpoint 的 MISSING 模块；存在 MISSING 时应使用普通 resume，此时 `Need run` 非零，不会触发空队列问题。
+这两个包装器动作使用 `--process-rerun-only`，读取现有计划、checkpoint 和 `latest`，补跑已有 checkpoint 的 TIMEOUT、unresolved process failure 或无可靠 case 报告的 FAIL，然后重建最终制品。它不会补跑完全缺少 checkpoint 的 MISSING 模块；存在 MISSING 时应使用普通 resume。
+
+新的 checkpoint 目录会写 `.run_manifest.json`。复用目录时，计划、PyTorch HEAD 与已跟踪修改、关键环境变量或语义参数发生变化会被拒绝；不要删除清单来绕过检查，应恢复原配置或使用新 work-dir。旧 checkpoint 首次续跑会先核对旧计划；计划一致后，无法追溯的旧源码、环境和参数仍会标记为“未验证接管”，检查器会持续显示提示。
 
 通用 `--analyze-only latest` 只扫描当前 `latest`，不能替代上述官方跨 timestamp 重建，因为可靠 FAIL 可能来自更早的 checkpoint `source_log`。
 

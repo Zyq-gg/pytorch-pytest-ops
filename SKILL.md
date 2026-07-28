@@ -30,6 +30,7 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
 3. For a long run, use `nohup env PYTHONUNBUFFERED=1 python3 -u ... > "$WORK/runner.out" 2>&1 &` and save `$!` to `runner.pid`.
 4. For a new run, include `--fresh`. For resume, use the same work directory and semantic parameters but remove `--fresh`.
 5. Keep custom environment variables identical across dry-run, run, automatic rerun, and resume. Use a different work directory when comparing configurations.
+   Current runners persist these semantics in `<work-dir>/.run_manifest.json` and reject mismatched resumes before replacing the saved plan. Do not delete the manifest to bypass this check. A legacy checkpoint adopted without an older manifest remains explicitly unverified.
 6. For the official queue, preserve both hard and idle timeout settings. The current shell defaults are 72 hours hard and 2 hours without subprocess output for initial and process-rerun modules.
 7. After every run command, provide output paths, status commands, resume behavior, and completion checks.
 
@@ -42,6 +43,7 @@ python3 "$OPS_ROOT/scripts/inspect_test_run.py" <work-dir> --pytorch-root "$PYTO
 ```
 
 Then inspect `runner.out`, active timestamp logs, and relevant JSON only as needed. Never conclude completion from `ps` alone. If the process ran on another node, explicitly say local process inspection is not authoritative.
+Distinguish `Run verdict` from `Artifact verdict`: the former becomes `RUNNING` for a matching local process, while the latter describes only on-disk completion artifacts.
 
 ### Decide whether a run is complete
 

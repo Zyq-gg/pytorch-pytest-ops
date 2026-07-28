@@ -21,6 +21,7 @@ REQUIRED = [
     "runners/run_pytorch_subset.py",
     "runners/rerun_stable_failures.py",
     "runners/run_official_run_test_queue.py",
+    "runners/run_manifest.py",
     "runners/run_test-2.13-official-queue.sh",
     "scripts/install_skill.sh",
     "scripts/inspect_test_run.py",

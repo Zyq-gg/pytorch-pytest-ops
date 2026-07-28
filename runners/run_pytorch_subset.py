@@ -37,6 +37,7 @@ from run_pytorch_tests_prefix import (  # noqa: E402
     deduplicate_failure_rows,
     empty_case_stats,
     filter_existing,
+    finalize_existing_pytest_run,
     generate_failure_reports,
     generate_failure_reports_from_rows,
     generate_summary,
@@ -50,6 +51,7 @@ from run_pytorch_tests_prefix import (  # noqa: E402
     sort_tests_by_history,
     update_current_summary_reports,
 )
+from run_manifest import build_run_manifest, ensure_run_manifest  # noqa: E402
 
 
 def make_env() -> dict[str, str]:
@@ -366,7 +368,40 @@ def run_pytest_list(args: argparse.Namespace) -> None:
     )
 
     selected_file = work_dir / "selected_test_files.txt"
-    selected_file.write_text("\n".join(tests) + ("\n" if tests else ""), encoding="utf-8")
+    progress_file = work_dir / ".test_progress.json"
+    manifest = build_run_manifest(
+        runner=f"subset-{args.cmd}",
+        pytorch_root=pytorch_root,
+        planned_items=tests,
+        options={
+            "gpu_ids": args.gpu_ids,
+            "num_gpus": args.num_gpus,
+            "include_prefix": args.include_prefix,
+            "exclude_prefix": args.exclude_prefix,
+            "include_regex": args.include_regex,
+            "exclude_regex": args.exclude_regex,
+            "timeout": args.timeout,
+            "crash_recovery": not args.no_crash_recovery,
+            "crash_chunk_size": args.crash_chunk_size,
+            "recovery_case_timeout": args.recovery_case_timeout,
+            "recovery_attempts": args.recovery_attempts,
+            "recovery_max_total_time": args.recovery_max_total_time,
+            "analyze": args.analyze,
+            "error_type": getattr(args, "error_type", None),
+            "publish_to_work_dir": getattr(args, "publish_to_work_dir", None),
+        },
+        env=make_env(),
+    )
+    ensure_run_manifest(
+        work_dir,
+        manifest,
+        fresh=args.fresh,
+        checkpoint_exists=progress_file.is_file(),
+        saved_plan_path=selected_file,
+    )
+    selected_file.write_text(
+        "\n".join(tests) + ("\n" if tests else ""), encoding="utf-8"
+    )
 
     print(f"PyTorch root:   {pytorch_root}")
     print(f"test dir:       {test_dir}")
@@ -380,7 +415,6 @@ def run_pytest_list(args: argparse.Namespace) -> None:
         raise SystemExit("no tests selected")
 
     gpu_ids = parse_gpu_ids(args.gpu_ids, args.num_gpus)
-    progress_file = work_dir / ".test_progress.json"
     if args.fresh and progress_file.exists():
         progress_file.unlink()
 
@@ -416,6 +450,14 @@ def run_pytest_list(args: argparse.Namespace) -> None:
 
     if not remaining:
         print("All selected tests completed.")
+        summary = finalize_existing_pytest_run(
+            work_dir=str(work_dir),
+            planned_tests=tests,
+            progress=progress,
+            gpu_ids=gpu_ids,
+            analyze=args.analyze,
+        )
+        print_final_report(summary, progress)
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -459,6 +501,7 @@ def run_pytest_list(args: argparse.Namespace) -> None:
             )
 
     failure_reports = generate_failure_reports(str(log_dir)) if args.analyze else {}
+    progress = load_progress(str(progress_file))
     summary = generate_summary(
         str(work_dir),
         str(log_dir),
@@ -466,8 +509,9 @@ def run_pytest_list(args: argparse.Namespace) -> None:
         gpu_ids,
         max((r["elapsed"] for r in results), default=time.time() - start),
         failure_reports,
+        progress=progress,
+        planned_tests=tests,
     )
-    progress = load_progress(str(progress_file))
     print_final_report(summary, progress)
 
 
@@ -621,7 +665,31 @@ def run_official_run_test_resume(args: argparse.Namespace, run_test_args: list[s
     if args.limit is not None:
         tests = tests[: args.limit]
     tests_file = work_dir / "run_test_modules.txt"
-    tests_file.write_text("\n".join(tests) + ("\n" if tests else ""), encoding="utf-8")
+    manifest = build_run_manifest(
+        runner="lightweight-official-resume",
+        pytorch_root=pytorch_root,
+        planned_items=tests,
+        options={
+            "run_test_args": run_test_args,
+            "timeout": args.timeout,
+            "dry_run_timeout": args.dry_run_timeout,
+            "include_regex": args.include_regex,
+            "exclude_regex": args.exclude_regex,
+            "limit": args.limit,
+            "analyze": args.analyze,
+        },
+        env=make_env(),
+    )
+    ensure_run_manifest(
+        work_dir,
+        manifest,
+        fresh=args.fresh,
+        checkpoint_exists=progress_file.is_file(),
+        saved_plan_path=tests_file,
+    )
+    tests_file.write_text(
+        "\n".join(tests) + ("\n" if tests else ""), encoding="utf-8"
+    )
 
     print(f"dry-run status:   {status}, elapsed={timedelta(seconds=int(elapsed))}")
     print(f"selected modules: {len(tests)}")

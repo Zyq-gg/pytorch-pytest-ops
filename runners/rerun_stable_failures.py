@@ -29,6 +29,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from run_manifest import build_run_manifest, ensure_run_manifest
+
 
 DEFAULT_TEST_ENV = {
     "PYTORCH_TEST_WITH_ROCM": "1",
@@ -92,7 +94,7 @@ def parse_gpu_ids(raw: str | None) -> list[int | None]:
     if raw is None or raw.strip() == "":
         return [None]
 
-    gpu_ids: list[int] = []
+    gpu_ids: list[int | None] = []
     for part in raw.split(","):
         item = part.strip()
         if not item:
@@ -569,6 +571,33 @@ def main() -> None:
     output_dir = Path(args.output_dir).resolve() if args.output_dir else failure_csv.parent / f"stable_rerun_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_csv = output_dir / "rerun_checkpoint.csv"
+    manifest = build_run_manifest(
+        runner="stable-case-rerun",
+        pytorch_root=pytorch_root,
+        planned_items=[row["nodeid"] for row in rows],
+        options={
+            "failure_csv": str(failure_csv),
+            "attempts": args.attempts,
+            "timeout": args.timeout,
+            "gpu_ids": gpu_ids,
+            "runner": args.runner,
+            "pytest_args": args.pytest_arg,
+            "official_run_test_args": args.official_run_test_arg,
+            "include_process_level": args.include_process_level,
+            "limit": args.limit,
+            "filter_column": args.filter_column,
+            "filter_equals": args.filter_equals,
+            "filter_contains": args.filter_contains,
+            "filter_regex": args.filter_regex,
+        },
+        env=make_env(None),
+    )
+    ensure_run_manifest(
+        output_dir,
+        manifest,
+        fresh=args.fresh,
+        checkpoint_exists=checkpoint_csv.is_file(),
+    )
 
     checkpoint_rows: list[dict[str, str]] = []
     if args.fresh and checkpoint_csv.exists():

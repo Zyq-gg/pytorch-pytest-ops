@@ -41,6 +41,13 @@ import termios
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from run_manifest import build_run_manifest, ensure_run_manifest
 
 DEFAULT_DRY_RUN_ARGS = ["--exclude-jit-executor", "--exclude-distributed-tests"]
 DEFAULT_TEST_ENV = {
@@ -120,7 +127,13 @@ def run_dry_run(test_dir: str, extra_args: list[str]) -> str:
     print(f"=== test dir: {test_dir} ===")
     print(f"=== command: {' '.join(cmd)} ===")
     result = subprocess.run(cmd, cwd=test_dir, env=make_test_env(), capture_output=True, text=True)
-    return result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"run_test.py --dry-run failed with return code {result.returncode}\n"
+            f"{output[-4000:]}"
+        )
+    return output
 
 
 def parse_dry_run_output(text: str) -> list[str]:
@@ -373,7 +386,7 @@ def run_with_pty(
     cmd: list[str],
     cwd: str,
     env: dict[str, str],
-    timeout: int = 0,
+    timeout: int | None = 0,
 ) -> tuple[int, str]:
     """
     Run *cmd* in a pseudo-terminal so the child process produces full pytest
@@ -423,7 +436,9 @@ def run_with_pty(
                 os.close(master_fd)
                 partial_output = b"".join(output_parts).decode("utf-8", errors="replace")
                 partial_output = partial_output.replace("\r", "\n")
-                raise subprocess.TimeoutExpired(cmd, timeout, output=partial_output)
+                raise subprocess.TimeoutExpired(
+                    cmd, float(timeout or 0), output=partial_output
+                )
 
         if proc.poll() is not None:
             break
@@ -2256,8 +2271,12 @@ def generate_summary(
     gpu_ids: list[int],
     total_elapsed: float,
     failure_reports: dict[str, str | int] | None = None,
+    *,
+    progress: dict[str, dict] | None = None,
+    planned_tests: list[str] | None = None,
+    finalize_only: bool = False,
 ) -> dict:
-    summary = {
+    summary: dict[str, Any] = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "log_dir": log_dir,
         "elapsed": round(total_elapsed, 1),
@@ -2269,6 +2288,7 @@ def generate_summary(
         "per_gpu": results,
         "all_failures": [],
         "failure_reports": failure_reports or {},
+        "finalize_only": finalize_only,
     }
 
     for result in results:
@@ -2279,16 +2299,106 @@ def generate_summary(
         summary["all_failures"].extend(result["failures"])
         add_case_stats(summary["case_stats"], result.get("case_stats", empty_case_stats()))
 
-    failures_by_file = {}
+    failures_by_file: dict[str, list[str]] = {}
     for name, error, _ in summary["all_failures"]:
         file_name = name.split("/")[-1] if "/" in name else name
         failures_by_file.setdefault(file_name, []).append(error)
     summary["failures_by_file"] = failures_by_file
 
+    if progress is not None:
+        scoped_progress = (
+            {test: progress[test] for test in planned_tests or [] if test in progress}
+            if planned_tests is not None
+            else progress
+        )
+        summary["progress_stats"] = compute_stats(scoped_progress)
+        summary["planned_count"] = (
+            len(planned_tests) if planned_tests is not None else len(scoped_progress)
+        )
+        summary["checkpoint_count"] = len(scoped_progress)
+        summary["missing_checkpoints"] = (
+            [test for test in planned_tests if test not in progress]
+            if planned_tests is not None
+            else []
+        )
+
     with open(os.path.join(work_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     return summary
+
+
+def resolve_latest_log_dir(work_dir: str) -> str | None:
+    latest = os.path.join(work_dir, "latest")
+    if os.path.islink(latest) and os.path.isdir(latest):
+        return os.path.realpath(latest)
+    latest_txt = os.path.join(work_dir, "latest.txt")
+    if os.path.isfile(latest_txt):
+        try:
+            with open(latest_txt, encoding="utf-8") as f:
+                candidate = f.read().strip()
+        except OSError:
+            return None
+        if os.path.isdir(candidate):
+            return os.path.abspath(candidate)
+    if os.path.isdir(latest):
+        return os.path.realpath(latest)
+    return None
+
+
+def update_latest_log_dir(work_dir: str, log_dir: str) -> None:
+    latest = os.path.join(work_dir, "latest")
+    try:
+        if os.path.islink(latest) or os.path.isfile(latest):
+            os.remove(latest)
+        elif os.path.isdir(latest):
+            raise OSError(f"refusing to replace real latest directory: {latest}")
+        if sys.platform == "win32":
+            raise OSError("use latest.txt on Windows")
+        os.symlink(os.path.basename(log_dir), latest)
+    except OSError:
+        with open(latest + ".txt", "w", encoding="utf-8") as f:
+            f.write(os.path.abspath(log_dir))
+
+
+def finalize_existing_pytest_run(
+    *,
+    work_dir: str,
+    planned_tests: list[str],
+    progress: dict[str, dict],
+    gpu_ids: list[int],
+    analyze: bool,
+) -> dict:
+    """Rebuild final artifacts when a resume has no files left to execute."""
+    log_dir = resolve_latest_log_dir(work_dir)
+    if log_dir is None:
+        failed = [
+            test
+            for test in planned_tests
+            if progress.get(test, {}).get("status") in {"FAIL", "TIMEOUT"}
+        ]
+        if failed:
+            raise RuntimeError(
+                "cannot finalize failed checkpoints without an existing latest log directory: "
+                + ", ".join(failed[:20])
+            )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir = os.path.join(work_dir, timestamp)
+        os.makedirs(log_dir, exist_ok=True)
+        update_latest_log_dir(work_dir, log_dir)
+
+    failure_reports = generate_failure_reports(log_dir) if analyze else {}
+    return generate_summary(
+        work_dir,
+        log_dir,
+        [],
+        gpu_ids,
+        0.0,
+        failure_reports,
+        progress=progress,
+        planned_tests=planned_tests,
+        finalize_only=True,
+    )
 
 
 def print_final_report(summary: dict, progress: dict[str, dict]) -> None:
@@ -2516,6 +2626,36 @@ def main() -> None:
             print("ERROR: no tests left after --include-prefix filtering")
             sys.exit(1)
 
+    manifest = build_run_manifest(
+        runner="direct-pytest",
+        pytorch_root=pytorch_root,
+        planned_items=tests,
+        options={
+            "gpu_ids": gpu_ids,
+            "dry_run_args": DEFAULT_DRY_RUN_ARGS + dry_run_extra,
+            "include_prefix": include_prefixes,
+            "timeout": args.timeout,
+            "crash_recovery": not args.no_crash_recovery,
+            "crash_chunk_size": args.crash_chunk_size,
+            "recovery_case_timeout": args.recovery_case_timeout,
+            "recovery_attempts": args.recovery_attempts,
+            "recovery_max_total_time": args.recovery_max_total_time,
+            "analyze": args.analyze,
+            "process_rerun": args.process_rerun,
+            "process_rerun_error_types": parse_csv_items(
+                args.process_rerun_error_types
+            ),
+            "process_rerun_timeout": args.process_rerun_timeout,
+        },
+        env=make_test_env(),
+    )
+    ensure_run_manifest(
+        work_dir,
+        manifest,
+        fresh=args.fresh,
+        checkpoint_exists=os.path.isfile(progress_file),
+        saved_plan_path=test_list_file,
+    )
     with open(test_list_file, "w", encoding="utf-8") as f:
         for test in tests:
             f.write(test + "\n")
@@ -2583,16 +2723,14 @@ def main() -> None:
 
     if not remaining:
         print("\nAll tests completed.")
-        print_final_report(
-            {
-                "total": {"passed": 0, "failed": 0, "skipped": 0, "elapsed": 0},
-                "all_failures": [],
-                "failures_by_file": {},
-                "elapsed": 0,
-                "log_dir": "",
-            },
-            progress,
+        summary = finalize_existing_pytest_run(
+            work_dir=work_dir,
+            planned_tests=tests,
+            progress=progress,
+            gpu_ids=gpu_ids,
+            analyze=args.analyze,
         )
+        print_final_report(summary, progress)
         return
 
     remaining = sort_tests_by_history(remaining, progress)
@@ -2607,17 +2745,7 @@ def main() -> None:
     log_dir = os.path.join(work_dir, timestamp)
     os.makedirs(log_dir, exist_ok=True)
 
-    latest_link = os.path.join(work_dir, "latest")
-    try:
-        if os.path.exists(latest_link):
-            os.remove(latest_link)
-        if sys.platform == "win32":
-            with open(latest_link + ".txt", "w", encoding="utf-8") as f:
-                f.write(log_dir)
-        else:
-            os.symlink(timestamp, latest_link)
-    except OSError:
-        pass
+    update_latest_log_dir(work_dir, log_dir)
 
     print(f"\nLog dir:       {log_dir}")
     print(f"Progress file: {progress_file}")
@@ -2733,8 +2861,17 @@ def main() -> None:
     if process_rerun_results:
         results.extend(process_rerun_results)
         total_elapsed += process_rerun_elapsed
-    summary = generate_summary(work_dir, log_dir, results, gpu_ids, total_elapsed, failure_reports)
     progress = load_progress(progress_file)
+    summary = generate_summary(
+        work_dir,
+        log_dir,
+        results,
+        gpu_ids,
+        total_elapsed,
+        failure_reports,
+        progress=progress,
+        planned_tests=tests,
+    )
     print_final_report(summary, progress)
     print()
 

@@ -105,16 +105,33 @@ def process_lines(work_dir: Path) -> tuple[list[str], list[str]]:
 def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
     work_dir = work_dir.resolve()
     latest = work_dir / "latest"
-    progress_path = work_dir / ".test_progress.json"
-    mode = "pytest"
-    if not progress_path.is_file():
-        progress_path = work_dir / ".run_test_progress.json"
-        mode = "official-run-test" if progress_path.is_file() else "unknown"
+    direct_progress = work_dir / ".test_progress.json"
+    official_progress = work_dir / ".run_test_progress.json"
+    direct_plan_names = [
+        "test_files.txt",
+        "selected_test_files.txt",
+        "failure_process_test_files.txt",
+    ]
+    official_plan_names = ["run_test_tests.txt", "run_test_modules.txt"]
+
+    if direct_progress.is_file():
+        mode = "pytest"
+        progress_path = direct_progress
+    elif official_progress.is_file():
+        mode = "official-run-test"
+        progress_path = official_progress
+    elif any((work_dir / name).is_file() for name in direct_plan_names):
+        mode = "pytest"
+        progress_path = direct_progress
+    elif any((work_dir / name).is_file() for name in official_plan_names):
+        mode = "official-run-test"
+        progress_path = official_progress
+    else:
+        mode = "unknown"
+        progress_path = direct_progress
 
     plan_candidates = (
-        ["test_files.txt", "selected_test_files.txt", "failure_process_test_files.txt"]
-        if mode == "pytest"
-        else ["run_test_tests.txt", "run_test_modules.txt"]
+        direct_plan_names if mode == "pytest" else official_plan_names
     )
     plan_path = next((work_dir / name for name in plan_candidates if (work_dir / name).is_file()), None)
     if mode == "official-run-test":
@@ -129,8 +146,13 @@ def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
     tests = progress.get("tests", progress)
     if not isinstance(tests, dict):
         tests = {}
-    statuses = Counter()
-    for value in tests.values():
+    scoped_tests = (
+        {item: tests[item] for item in plan if item in tests}
+        if plan
+        else tests
+    )
+    statuses: Counter[str] = Counter()
+    for value in scoped_tests.values():
         status = value.get("status") if isinstance(value, dict) else value
         statuses[str(status or "UNKNOWN").upper()] += 1
     missing = [item for item in plan if item not in tests]
@@ -140,13 +162,15 @@ def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
         virtual_missing = [item for item in missing if is_known_direct_virtual_target(item)]
         missing_real = [item for item in missing if item not in virtual_missing]
     nonterminal = []
-    for item, value in tests.items():
+    for item, value in scoped_tests.items():
         status = value.get("status") if isinstance(value, dict) else value
         if str(status or "").upper() not in TERMINAL:
             nonterminal.append(item)
 
     summary_path = work_dir / "summary.json"
     summary = load_json(summary_path)
+    manifest_path = work_dir / ".run_manifest.json"
+    manifest = load_json(manifest_path)
     if pytorch_root is None:
         candidate = (summary or {}).get("pytorch_root") or os.environ.get("PYTORCH_ROOT")
         if candidate:
@@ -198,6 +222,14 @@ def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
             completion_issues.append("official coverage_complete is false")
 
     legacy_hints: list[str] = []
+    if progress_path.is_file() and manifest is None:
+        legacy_hints.append(
+            "checkpoint predates the run manifest; its original configuration cannot be verified"
+        )
+    elif manifest and manifest.get("legacy_checkpoint_adopted_without_verification"):
+        legacy_hints.append(
+            "run manifest was adopted for a legacy checkpoint without historical verification"
+        )
     runner_out = work_dir / "runner.out"
     try:
         runner_text = runner_out.read_text(encoding="utf-8", errors="replace")
@@ -222,6 +254,8 @@ def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
         artifact_verdict = "NOT_FINALIZED"
 
     workdir_processes, all_runner_processes = process_lines(work_dir)
+    run_complete = artifacts_complete and not workdir_processes
+    run_verdict = "RUNNING" if workdir_processes else artifact_verdict
     return {
         "work_dir": str(work_dir),
         "mode": mode,
@@ -243,6 +277,12 @@ def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
         "summary_exists": summary is not None,
         "summary_time": summary_time,
         "summary_unresolved": reports.get("unresolved_process_failure_count"),
+        "run_manifest_exists": manifest is not None,
+        "run_manifest_fingerprint": (manifest or {}).get("fingerprint"),
+        "run_manifest_runner": ((manifest or {}).get("details") or {}).get("runner"),
+        "run_manifest_legacy_adoption": bool(
+            (manifest or {}).get("legacy_checkpoint_adopted_without_verification")
+        ),
         "coverage": coverage,
         "failure_report": report,
         "unresolved_report": unresolved,
@@ -258,6 +298,8 @@ def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
         "failure_report_time": report_time,
         "artifact_verdict": artifact_verdict,
         "artifacts_complete": artifacts_complete,
+        "run_verdict": run_verdict,
+        "run_complete": run_complete,
         "completion_issues": completion_issues,
         "legacy_hints": legacy_hints,
         "local_workdir_processes": workdir_processes,
@@ -266,6 +308,7 @@ def inspect(work_dir: Path, pytorch_root: Path | None = None) -> dict[str, Any]:
 
 
 def print_text(data: dict[str, Any]) -> None:
+    print(f"Run verdict:           {data['run_verdict']}")
     print(f"Artifact verdict:      {data['artifact_verdict']}")
     print(f"Work dir:             {data['work_dir']}")
     print(f"Mode:                 {data['mode']}")
@@ -285,6 +328,12 @@ def print_text(data: dict[str, Any]) -> None:
     print(f"Summary exists:       {data['summary_exists']}")
     print(f"Summary time:         {data['summary_time']}")
     print(f"Summary unresolved:   {data['summary_unresolved']}")
+    print(
+        "Run manifest:         "
+        f"exists={data['run_manifest_exists']} "
+        f"runner={data['run_manifest_runner']} "
+        f"fingerprint={data['run_manifest_fingerprint']}"
+    )
     coverage = data["coverage"]
     if coverage:
         print(

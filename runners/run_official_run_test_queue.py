@@ -36,6 +36,7 @@ from run_pytorch_tests_prefix import (
     generate_failure_reports_from_rows,
     is_process_level_failure,
 )
+from run_manifest import build_run_manifest, ensure_run_manifest
 
 
 DEFAULT_TEST_ENV = {
@@ -337,6 +338,7 @@ def write_module_coverage(
         if status not in {"PASS", "FAIL", "TIMEOUT"}:
             missing.append(module)
         if status == "TIMEOUT":
+            assert item is not None
             timeout_modules.append(module)
             timeout_details.append(
                 {
@@ -760,6 +762,9 @@ def execute_queue(
     idle_timeout: int,
     run_test_args: list[str],
 ) -> list[dict]:
+    if not tests:
+        return []
+
     work_queue: queue.Queue[tuple[int, str]] = queue.Queue()
     for index, test in enumerate(tests):
         work_queue.put((index, test))
@@ -915,8 +920,44 @@ def main() -> int:
     )
 
     test_list_file = work_dir / "run_test_tests.txt"
+    progress_file = work_dir / ".run_test_progress.json"
+    manifest = build_run_manifest(
+        runner="official-queue",
+        pytorch_root=pytorch_root,
+        planned_items=tests,
+        options={
+            "run_test_args": run_test_args,
+            "gpu_ids": args.gpu_ids,
+            "no_bind_gpu": args.no_bind_gpu,
+            "timeout": args.timeout,
+            "idle_timeout": args.idle_timeout,
+            "no_analyze": args.no_analyze,
+            "process_rerun": args.process_rerun,
+            "process_rerun_error_types": sorted(
+                parse_csv_items(args.process_rerun_error_types)
+            ),
+            "process_rerun_timeout": args.process_rerun_timeout,
+            "process_rerun_idle_timeout": args.process_rerun_idle_timeout,
+        },
+        env=make_env(),
+    )
+    ignored_manifest_paths = (
+        {"options.timeout", "options.idle_timeout"}
+        if args.process_rerun_only
+        else set()
+    )
+    ensure_run_manifest(
+        work_dir,
+        manifest,
+        fresh=args.fresh,
+        checkpoint_exists=progress_file.is_file(),
+        ignored_paths=ignored_manifest_paths,
+        saved_plan_path=test_list_file,
+    )
     if not args.process_rerun_only:
-        test_list_file.write_text("\n".join(tests) + ("\n" if tests else ""), encoding="utf-8")
+        test_list_file.write_text(
+            "\n".join(tests) + ("\n" if tests else ""), encoding="utf-8"
+        )
 
     print(f"PyTorch root: {pytorch_root}", flush=True)
     print(f"test dir:     {test_dir}", flush=True)
@@ -933,7 +974,6 @@ def main() -> int:
     if not tests:
         raise SystemExit("no tests selected")
 
-    progress_file = work_dir / ".run_test_progress.json"
     if args.fresh and progress_file.exists():
         progress_file.unlink()
     progress = load_progress(progress_file)
@@ -948,7 +988,11 @@ def main() -> int:
         skip_fail=args.skip_fail,
     )
 
-    gpu_ids: list[int | None] = [None] if args.no_bind_gpu else parse_gpu_ids(args.gpu_ids)
+    gpu_ids: list[int | None] = []
+    if args.no_bind_gpu:
+        gpu_ids.append(None)
+    else:
+        gpu_ids.extend(parse_gpu_ids(args.gpu_ids))
     print(f"Done PASS:    {resume_stats['pass']}", flush=True)
     if args.skip_fail:
         fail_note = " skip"
@@ -993,7 +1037,7 @@ def main() -> int:
 
     start = time.time()
     results = []
-    if not args.process_rerun_only:
+    if not args.process_rerun_only and remaining:
         results = execute_queue(
             tests=remaining,
             gpu_ids=gpu_ids,
@@ -1078,6 +1122,9 @@ def main() -> int:
         )
     unresolved_count = failure_reports.get("unresolved_process_failure_count", 0)
     coverage = write_module_coverage(work_dir, tests, progress, unresolved_count)
+    selected_progress = {
+        module: progress[module] for module in tests if module in progress
+    }
 
     summary = {
         "pytorch_root": str(pytorch_root),
@@ -1111,10 +1158,16 @@ def main() -> int:
         "coverage_complete": coverage["coverage_complete"],
         "progress_stats": {
             "total_selected": len(tests),
-            "completed_records": len(progress),
-            "pass": sum(1 for v in progress.values() if v.get("status") == "PASS"),
-            "fail": sum(1 for v in progress.values() if v.get("status") == "FAIL"),
-            "timeout": sum(1 for v in progress.values() if v.get("status") == "TIMEOUT"),
+            "completed_records": len(selected_progress),
+            "pass": sum(
+                1 for v in selected_progress.values() if v.get("status") == "PASS"
+            ),
+            "fail": sum(
+                1 for v in selected_progress.values() if v.get("status") == "FAIL"
+            ),
+            "timeout": sum(
+                1 for v in selected_progress.values() if v.get("status") == "TIMEOUT"
+            ),
         },
     }
     (work_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")

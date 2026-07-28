@@ -20,6 +20,66 @@ SPEC.loader.exec_module(QUEUE)
 
 
 class OfficialQueueCompletionTest(unittest.TestCase):
+    def test_empty_queue_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            self.assertEqual(
+                QUEUE.execute_queue(
+                    tests=[],
+                    gpu_ids=[0],
+                    test_dir=path,
+                    log_dir=path,
+                    progress_file=path / "progress.json",
+                    hard_timeout=1,
+                    idle_timeout=1,
+                    run_test_args=[],
+                ),
+                [],
+            )
+
+    def test_main_rebuilds_reports_when_resume_has_no_remaining_modules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pytorch_root = root / "pytorch"
+            (pytorch_root / "test").mkdir(parents=True)
+            work = root / "work"
+            log_dir = work / "20260728_120000"
+            log_dir.mkdir(parents=True)
+            (work / "latest").symlink_to(log_dir.name)
+            test_list = root / "modules.txt"
+            test_list.write_text("test_complete\n", encoding="utf-8")
+            (work / ".run_test_progress.json").write_text(
+                json.dumps(
+                    {
+                        "tests": {
+                            "test_complete": {"status": "PASS"},
+                            "stale_other_plan": {"status": "FAIL"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            argv = [
+                "run_official_run_test_queue.py",
+                str(pytorch_root),
+                "--work-dir",
+                str(work),
+                "--test-list",
+                str(test_list),
+                "--no-process-rerun",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(QUEUE.main(), 0)
+
+            summary = json.loads((work / "summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary["coverage_complete"])
+            self.assertEqual(summary["resume_executed_modules"], [])
+            self.assertEqual(summary["progress_stats"]["completed_records"], 1)
+            self.assertEqual(summary["progress_stats"]["fail"], 0)
+            self.assertTrue((log_dir / "failure_report.csv").is_file())
+            self.assertTrue((log_dir / "unresolved_process_failures.csv").is_file())
+
     def test_idle_and_hard_timeout_are_independent(self):
         self.assertEqual(
             QUEUE.timeout_kind(

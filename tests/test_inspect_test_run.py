@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,30 @@ SPEC.loader.exec_module(INSPECTOR)
 
 
 class InspectTestRunTest(unittest.TestCase):
+    def test_direct_dry_run_mode_is_inferred_from_plan_without_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "test_files.txt").write_text(
+                "test_real.py\ndoctests.py\n", encoding="utf-8"
+            )
+            result = INSPECTOR.inspect(work)
+            self.assertEqual(result["mode"], "pytest")
+            self.assertEqual(result["plan_count"], 2)
+            self.assertEqual(result["virtual_plan_count"], 1)
+
+    def test_active_local_process_changes_run_verdict_not_artifact_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self.make_direct_run(Path(tmp))
+            with mock.patch.object(
+                INSPECTOR,
+                "process_lines",
+                return_value=(["active runner"], ["active runner"]),
+            ):
+                result = INSPECTOR.inspect(work)
+            self.assertEqual(result["artifact_verdict"], "COMPLETE")
+            self.assertEqual(result["run_verdict"], "RUNNING")
+            self.assertFalse(result["run_complete"])
+
     def make_direct_run(self, root: Path, unresolved_rows: int = 0) -> Path:
         work = root / "work"
         latest = work / "20260715_120000"
@@ -80,6 +105,16 @@ class InspectTestRunTest(unittest.TestCase):
             self.assertEqual(result["artifact_verdict"], "FINALIZED_INCOMPLETE")
             self.assertIn(
                 "2 unresolved process-level failures remain", result["completion_issues"]
+            )
+
+    def test_legacy_checkpoint_without_manifest_is_reported_as_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self.make_direct_run(Path(tmp))
+            result = INSPECTOR.inspect(work)
+            self.assertFalse(result["run_manifest_exists"])
+            self.assertTrue(
+                any("original configuration cannot be verified" in hint
+                    for hint in result["legacy_hints"])
             )
 
     def test_lightweight_official_run_does_not_require_queue_coverage(self):

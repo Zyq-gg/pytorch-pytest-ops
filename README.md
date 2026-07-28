@@ -127,6 +127,7 @@ python3 "$OPS_ROOT/scripts/inspect_test_run.py" \
 
 状态检查器会汇总：
 
+- `Run verdict`：在制品判定基础上纳入本机同 work-dir 活动进程
 - `Artifact verdict`：`COMPLETE`、`FINALIZED_INCOMPLETE` 或 `NOT_FINALIZED`
 - 测试入口类型
 - 清单和 checkpoint 数量，并区分 direct-pytest 的官方 virtual 目标与真实漏跑文件
@@ -136,6 +137,7 @@ python3 "$OPS_ROOT/scripts/inspect_test_run.py" \
 - failure 和 unresolved 报告行数
 - 自动文件补跑是否完成
 - 官方模块补跑是否完成，以及 `coverage_complete/planned/terminal/timeout/missing` 和各 timeout 的 idle/hard 类型
+- `.run_manifest.json` 的 runner、指纹和 legacy 未验证接管状态
 - 明确的 `Completion issues` 和旧版 runner/report 元数据提示
 - 本机命令行中包含该 work-dir 的进程
 
@@ -198,6 +200,8 @@ echo $! > "$WORK/runner.pid"
 
 官方 Normal/Distributed 全量、直接 pytest 子集、历史失败补跑和稳定失败重测命令见 `docs/PYTORCH_PYTEST_WORKFLOW.md`。新建无人值守全量应使用完整官方队列的 `run-normal` 和 `run-distributed`；`run_pytorch_subset.py run-test-resume` 只作为轻量探索和旧目录兼容入口。
 
+当前 runner 会在 work-dir 写 `.run_manifest.json`，用不可逆哈希记录计划、PyTorch 源码、关键环境和语义参数。续跑不一致时会在覆盖计划或启动 worker 前拒绝复用 checkpoint；环境变量原值不会写入清单。详细核验与修复说明见 `docs/RUNNER_RELIABILITY_FIXES_2026-07.md`。
+
 官方 `run_test.py` 队列还会生成：
 
 - `module_status.csv`：每个计划模块的最终 `status/elapsed/returncode/time/attempts/timeout_kind/source_log`；`TIMEOUT/MISSING` 都表示覆盖未闭合
@@ -235,6 +239,7 @@ pytorch-pytest-ops/
   agents/openai.yaml
   docs/
     PYTORCH_PYTEST_WORKFLOW.md
+    RUNNER_RELIABILITY_FIXES_2026-07.md
   references/
     commands.md
     runner-selection.md
@@ -244,12 +249,16 @@ pytorch-pytest-ops/
     inspect_test_run.py
     self_check.py
   runners/
+    run_manifest.py
     run_pytorch_tests_prefix.py
     run_pytorch_subset.py
     rerun_stable_failures.py
     run_official_run_test_queue.py
     run_test-2.13-official-queue.sh
   tests/
+    test_failure_parser.py
+    test_inspect_test_run.py
+    test_run_manifest.py
     test_stepcurrent_cache_compat.py
     test_recovery_budget.py
     test_official_queue_completion.py
@@ -258,6 +267,7 @@ pytorch-pytest-ops/
 - `SKILL.md`：Codex 的核心操作规则
 - `runners/`：clone 后可直接执行的测试 runner
 - `docs/PYTORCH_PYTEST_WORKFLOW.md`：完整测试流程文档
+- `docs/RUNNER_RELIABILITY_FIXES_2026-07.md`：本轮问题复现、根因、修复和兼容边界
 - `references/commands.md`：常用命令模板
 - `references/runner-selection.md`：测试入口选择
 - `references/status-and-reports.md`：状态和报告语义
@@ -267,11 +277,15 @@ pytorch-pytest-ops/
 - `tests/test_stepcurrent_cache_compat.py`：PyTorch 2.9/2.13 stepcurrent 布局回归测试
 - `tests/test_recovery_budget.py`：恢复超时预算与精确 case 重试回归测试
 - `tests/test_official_queue_completion.py`：官方模块补跑、unresolved 和 coverage 回归测试
+- `tests/test_failure_parser.py`：dry-run、仅收尾和报告解析回归测试
+- `tests/test_inspect_test_run.py`：完成判定、入口推断和活动进程回归测试
+- `tests/test_run_manifest.py`：运行语义清单与隐私边界回归测试
 
 ## 安全边界
 
 - 状态查询默认只读，不自动启动、停止或清理进程。
 - 新任务可以使用 `--fresh`；续跑同一目录时不能继续使用 `--fresh`。
 - 自定义环境变量必须在 dry-run、正式运行、自动补跑和续跑时保持一致。
+- 不要删除 `.run_manifest.json` 绕过续跑不一致；恢复原语义配置或使用新 work-dir。
 - `TORCHINDUCTOR_CPP_MARCH` 会改变 Inductor C++ 编译目标；不同值必须使用不同 work-dir，已有 `*_znver1*` 任务续跑时必须保持该值。
 - 普通 direct-pytest、官方 custom handlers 和 distributed-tests 是不同覆盖类别，不能互相替代。

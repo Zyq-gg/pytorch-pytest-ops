@@ -189,7 +189,7 @@ PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-normal
 ```
 
-包装器会在后台启动 runner，并在终端打印 PID 和日志路径；当前脚本不会自动写 `runner.pid`。正常续跑使用 `resume-normal`，并保持上述环境变量不变。
+包装器会在后台启动 runner，并在终端打印 PID 和日志路径。每次启动都会写带时间戳和 shell pid 的输出及 pid 文件，并维护 `runner_run_latest.out`、`runner_resume_latest.out` 或 `runner_incomplete_rerun_latest.out` 符号链接，避免启动新任务覆盖旧日志。正常续跑使用 `resume-normal`，并保持上述环境变量不变。
 
 验收至少要求：
 
@@ -203,7 +203,7 @@ bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" run-normal
 
 官方队列 resume 会保留跨时间戳的可靠 FAIL 报告。启动输出中的 `Done FAIL: N (reuse X, retry Y)` 表示：已有具体 case 的 FAIL 直接复用；无可靠 case 的 FAIL、TIMEOUT 和 MISSING 进入 `Need run`。本轮执行过的模块会用新报告整体替换旧行，未重跑模块保留 checkpoint 中的历史 `source_log`。
 
-当前 runner 有一个已知边界：当普通 `resume-normal` 计算出 `Need run: 0` 时，仍会调用空执行队列并触发 `ValueError: max_workers must be greater than 0`，因此不能依靠该动作做纯报告重建。现版本需要只补跑不完整模块或只重建报告时，使用：
+普通 `resume-normal` 在 `Need run: 0` 时会跳过空执行队列，并从 checkpoint 的权威日志重建最终报告、coverage 和根 summary。只想重跑已有 checkpoint 中的不完整模块时，使用：
 
 ```bash
 ENV_SH="$ENV_SH" \
@@ -216,7 +216,7 @@ PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" rerun-incomplete-normal
 ```
 
-该动作对应 `--process-rerun-only`：它会从模块开头重跑已有 checkpoint 的 TIMEOUT、unresolved process failure，以及没有可靠 case 报告的 FAIL；它不会补跑完全缺少 checkpoint 的 MISSING 模块。没有符合补跑条件的模块时，它只从 checkpoint 权威日志重建最终报告、coverage 和根 summary。若目录仍有 MISSING，应使用普通 `resume-normal`，此时 `Need run` 非零，不会触发空队列问题。
+该动作对应 `--process-rerun-only`：它会从模块开头重跑已有 checkpoint 的 TIMEOUT、unresolved process failure，以及没有可靠 case 报告的 FAIL；它不会补跑完全缺少 checkpoint 的 MISSING 模块。没有符合补跑条件的模块时，它只重建最终制品。若目录仍有 MISSING，应使用普通 `resume-normal`。
 
 ## 完整官方 Distributed 队列
 
@@ -255,7 +255,7 @@ PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash "$OPS_ROOT/runners/run_test-2.13-official-queue.sh" rerun-incomplete-distributed
 ```
 
-它同样避开普通 resume 在 `Need run: 0` 时的当前空队列限制。
+它与普通 resume 的区别是只选择已有 checkpoint 中需要完整模块补跑的项，不补 MISSING；不是规避空队列错误的临时方案。
 
 ## 自定义环境变量
 
@@ -266,6 +266,8 @@ nohup env PYTHONUNBUFFERED=1 TORCHINDUCTOR_CPP_MARCH=znver1 python3 -u ...
 ```
 
 dry-run、首次运行、自动补跑和续跑必须使用完全相同的自定义变量。比较不同配置时必须使用不同 work-dir。
+
+runner 会把计划、PyTorch 源码、关键环境和语义参数的指纹写入 `<work-dir>/.run_manifest.json`。续跑发生不一致时会拒绝复用 checkpoint，并提示变化属于 `source`、`plan`、`environment` 还是 `options`。清单只保存环境变量名和整体哈希，不保存变量原值。
 
 `TORCHINDUCTOR_CPP_MARCH` 会改变 Inductor C++ 编译目标，例如从 `-march=native` 改为指定目标。它只应在明确命名的配置中使用，且不能在同一 work-dir 的续跑或发布过程中途改变。
 

@@ -2,7 +2,7 @@
 
 本文档按仓库 `runners/` 最新脚本整理，命令示例基于当前容器环境。仓库可以 clone 到任意目录；其他环境先设置 `OPS_ROOT=/实际/clone/路径`，并把示例中的 `/workspace/pytorch-pytest-ops` 替换为 `$OPS_ROOT`。日志解析、报告生成和状态检查所需脚本均已包含在本仓库，不依赖旧的 `/workspace/torch_test` 或 `/home/tmp/python_and_sh` 解析脚本。
 
-本文按 2026-07-17 仓库最新 runner 行为重新核对。两套入口的默认定位如下：
+本文按 2026-07-28 仓库最新 runner 行为重新核对。两套入口的默认定位如下：
 
 1. 主全量入口：第 6 节用官方 `run_test.py` 队列跑 Normal，第 7 节用同一队列跑 Distributed；shell 包装器是 `run_test-2.13-official-queue.sh`。需要完整全量基线时两类都要运行并分别验收。
 2. 辅助直接 pytest 入口：第 2～4 节直接运行真实 `.py` 文件或具体 nodeid，主要用于模块/文件/case 筛选、代码修改后的增量测试、故障复现、历史失败补跑和稳定失败确认；它保留普通文件全量能力，但不是默认完整覆盖入口。
@@ -128,6 +128,14 @@ bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-n
 - 第 6、7 节官方 shell 队列：提前 `export`，或像上例放在 `bash` 命令前；shell 会继续传给 Python runner 和 `run_test.py`。
 - dry-run 如果会受该变量影响，也必须使用与正式运行相同的值。
 - 中断续跑必须继续使用完全相同的自定义环境变量，否则同一 checkpoint 会混入不同编译/运行配置的结果。
+
+### 1.2 运行语义清单
+
+当前 direct pytest、subset、轻量 official、完整官方队列和稳定失败重测都会在 work-dir 写 `.run_manifest.json`。清单以不可逆哈希记录计划、PyTorch HEAD 与已跟踪修改、关键测试环境以及该入口的 GPU/筛选/timeout/恢复等语义参数；环境变量原值不会写入文件。
+
+不带 `--fresh` 续跑时，runner 在覆盖计划和启动 worker 前验证清单。出现 `run manifest mismatch in source/plan/environment/options` 时，应恢复首次运行的配置或换新 work-dir，不能删除清单强行混用。旧 checkpoint 第一次被新版接管时会先核对旧计划，但无法验证旧源码、环境和参数；清单会永久标记 `legacy_checkpoint_adopted_without_verification`，状态检查器也会提示这一边界。
+
+详细设计、复现和修复说明见 `docs/RUNNER_RELIABILITY_FIXES_2026-07.md`。
 - 比较不同 `TORCHINDUCTOR_CPP_MARCH` 时应使用不同 work-dir，不要复用 checkpoint。
 
 `TORCHINDUCTOR_CPP_MARCH` 会改变 TorchInductor C++ kernel 和 host-side C++ wrapper 的编译参数。x86_64 默认通常是 `-march=native`，设置 `znver1` 后变成 `-march=znver1`；它可能改变可用 SIMD、编译结果、性能、timeout 概率和部分数值路径。它不是所有节点都应设置的通用优化项：只有测试目标明确要求 `znver1` 时才设置，并在目录名或测试说明中标明该配置。当前 NMZ 容器是 Intel CPU，不应把 `znver1` 当作默认基线；已有 `*_znver1*` 目录的首次运行、续跑和重测则必须继续保持该变量，不能中途切回默认值。
@@ -295,6 +303,7 @@ nohup env PYTHONUNBUFFERED=1 python3 -u /workspace/pytorch-pytest-ops/runners/ru
   runner.out
   test_files.txt
   .test_progress.json
+  .run_manifest.json
   summary.json
   latest -> <timestamp>
   <timestamp>/
@@ -320,6 +329,7 @@ nohup env PYTHONUNBUFFERED=1 python3 -u /workspace/pytorch-pytest-ops/runners/ru
 - `runner.out`：主调度器日志
 - `test_files.txt`：官方 dry-run 得到的测试文件清单
 - `.test_progress.json`：文件级 checkpoint
+- `.run_manifest.json`：计划、源码、关键环境和语义参数指纹，续跑前校验
 - `summary.json`：本次启动的 worker/case 统计、累计 checkpoint 状态和最终报告路径；续跑时 `total.passed/failed/skipped` 只统计本次实际执行，累计文件状态看 `.test_progress.json` 或 runner 尾部的 `Cumulative ...`
 - `latest`：指向最近一次 timestamp 目录
 - `gpu_*.log`：每张 GPU 的原始 pytest 日志
@@ -761,6 +771,7 @@ python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py pytest-list 
   runner.out
   selected_test_files.txt
   .test_progress.json
+  .run_manifest.json
   summary.json
   latest -> <timestamp>
   <timestamp>/
@@ -1227,6 +1238,7 @@ python3 run_test.py --include <module> --distributed-tests --continue-through-er
   run_test_dry_run.log
   run_test_modules.txt
   .run_test_progress.json
+  .run_manifest.json
   summary.json
   latest -> <timestamp>
   <timestamp>/
@@ -1246,6 +1258,7 @@ python3 run_test.py --include <module> --distributed-tests --continue-through-er
 
 - `run_test_modules.txt`：官方 dry-run 模块清单
 - `.run_test_progress.json`：模块级 checkpoint
+- `.run_manifest.json`：计划、源码、关键环境和语义参数指纹，续跑前校验
 - `run_test_failures.csv`：失败/超时模块列表
 - `failure_report.csv`：从官方 run_test.py 日志中召回的 case 级失败候选；包含稳定失败，也可能包含重试后通过的普通 FAILED
 - `unresolved_process_failures.*`：仍无法映射到具体 case 的模块级 timeout/crash/process 行
@@ -1481,6 +1494,7 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
   run_test_dry_run.out
   run_test_tests.txt
   .run_test_progress.json
+  .run_manifest.json
   summary.json
   module_status.csv
   coverage_report.json
@@ -1574,9 +1588,11 @@ bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh statu
 tail -f /home/tmp/torch2.13/run_test_official_nmz/latest/run_test_gpu_0.log
 
 # 只补跑不完整模块时，主输出和原始日志分别看：
-tail -f /home/tmp/torch2.13/run_test_official_nmz/runner_incomplete_rerun.out
+tail -f /home/tmp/torch2.13/run_test_official_nmz/runner_incomplete_rerun_latest.out
 tail -f /home/tmp/torch2.13/run_test_official_nmz/latest/process_module_rerun*/run_test_gpu_*.log
 ```
+
+官方 shell 包装器每次后台启动都使用带时间戳和 shell pid 的独立 `runner_run_*.out`、`runner_resume_*.out` 或 `runner_incomplete_rerun_*.out`，同时写对应 pid 文件并维护 `*_latest.out` 符号链接。这样新一次 resume 不会覆盖上一轮 runner 输出。
 
 `.run_test_progress.json` 只在一个完整官方模块结束后写入，不按 case 实时增加。遇到 `functorch/test_ops`、`test_c10d_nccl` 或大型 inductor 模块时，checkpoint 数小时不变并不等于卡住；应同时查看当前 `run_test_gpu_*.log` 的 mtime/大小和尾部 case。只要日志持续输出，2 小时 idle watchdog 就不会触发：
 
@@ -1619,7 +1635,7 @@ Need run:     46
 
 最终报告按模块合并历史和本次日志：本次重跑模块的旧行会被删除并由新结果替换；没有重跑的可靠 FAIL 保留原 `source_log`。这样既避免无意义重跑，也不会把半截旧日志与新日志混成重复 case。显式传 `--skip-fail` 时仍会跳过所有旧 FAIL/TIMEOUT，主要用于只关心未运行模块的特殊场景，不作为完整最终报告的默认选择。
 
-runner 代码或解析器升级不会改变已经启动的 Python 进程。旧进程结束后若要应用新解析规则，先确认没有同目录 runner。若仍有无报告 FAIL、TIMEOUT 或 MISSING，使用相同目录执行 `resume-normal`，这些模块会进入非空执行队列。当前版本有一个已知边界：普通 resume 计算出 `Need run: 0` 后仍会创建空线程池并报 `ValueError: max_workers must be greater than 0`；此时应改用 `rerun-incomplete-normal`，通过 `--process-rerun-only` 从 checkpoint 的历史 `source_log` 重建跨时间戳最终报告。不要只对当前 `latest` 使用通用 `--analyze-only` 来替代这一步，因为可靠 FAIL 可能来自更早 timestamp。
+runner 代码或解析器升级不会改变已经启动的 Python 进程。旧进程结束后若要应用新解析规则，先确认没有同目录 runner，再使用相同目录和原语义参数执行 `resume-normal`。若有无报告 FAIL、TIMEOUT 或 MISSING，必要模块会重新进入队列；若 `Need run: 0`，runner 会跳过空队列并直接从 checkpoint 的历史 `source_log` 重建跨时间戳最终报告。只想重跑已有 checkpoint 中的不完整模块时才使用 `rerun-incomplete-normal`。不要只对当前 `latest` 使用通用 `--analyze-only` 替代跨时间戳重建，因为可靠 FAIL 可能来自更早 timestamp。
 
 确认模块不遗漏：
 
@@ -1822,7 +1838,7 @@ distributed 同样只在整个模块结束时更新 checkpoint。`test_c10d_nccl
 
 把 6.6 对账脚本的 work-dir 改成 distributed 目录。正常结束必须 summary/report 完整，并且 `coverage_report.json` 同时满足 `missing: 0`、`timeout: 0`、`unresolved_process_failures: 0`、`coverage_complete: true`。只看到 `.run_test_progress.json` 已有全部模块记录仍不够，因为其中可能包含 `TIMEOUT`。
 
-解析器升级后重建跨时间戳 distributed 报告必须先等旧进程结束。有无可靠 case 的 FAIL、TIMEOUT 或 MISSING 时，使用同目录 `resume-distributed` 先补齐再收尾。若普通 resume 计算出 `Need run: 0`，当前版本会触发空线程池错误，应改用 `rerun-incomplete-distributed` 从 checkpoint 的历史 `source_log` 重建报告。
+解析器升级后重建跨时间戳 distributed 报告必须先等旧进程结束，然后用原语义参数执行同目录 `resume-distributed`：有无可靠 case 的 FAIL、TIMEOUT 或 MISSING 时先补齐再收尾，`Need run: 0` 时直接从 checkpoint 的历史 `source_log` 重建报告。`rerun-incomplete-distributed` 只用于重跑已有 checkpoint 中的不完整模块。
 
 ### 7.4 Distributed 子集
 
@@ -1984,7 +2000,7 @@ python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_tests_prefix.py \
 
 对第 6/7 节完整官方队列，不要把只扫描当前 `latest` 的 `--analyze-only` 当成完整重建：可靠 FAIL 可能来自更早的 timestamp，而当前 checkpoint 的 `source_log` 才是每个模块的权威来源。
 
-应用新版解析器的完整做法是：先确认旧 runner 已结束、目标仓库已更新。存在无报告 FAIL、TIMEOUT 或 MISSING 时，对同一个 work-dir 使用原语义参数执行 `resume-normal` 或 `resume-distributed`，先运行非空必要模块队列。若所有模块已有可复用终态、只需重建 failure/unresolved、module status、coverage 和根 summary，当前版本应使用 `rerun-incomplete-normal` 或 `rerun-incomplete-distributed`；普通 resume 在 `Need run: 0` 时存在空线程池错误。下面是纯重建/已有 checkpoint 不完整模块补跑示例：
+应用新版解析器的完整做法是：先确认旧 runner 已结束、目标仓库已更新，再对同一个 work-dir 使用原语义参数执行 `resume-normal` 或 `resume-distributed`。存在无报告 FAIL、TIMEOUT 或 MISSING 时先运行必要模块；所有模块已有可复用终态时，普通 resume 会跳过空队列并重建 failure/unresolved、module status、coverage 和根 summary。只希望重跑已有 checkpoint 中的不完整模块时，使用下面的 `rerun-incomplete-*`：
 
 ```bash
 # Normal
@@ -2005,7 +2021,7 @@ PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh rerun-incomplete-distributed
 ```
 
-`rerun-incomplete-*` 会补跑已有 checkpoint 的 TIMEOUT、unresolved process failure 和无可靠 case 报告的 FAIL，但不会补跑完全缺少 checkpoint 的 MISSING。存在 MISSING 时仍要使用普通 resume；此时 `Need run` 非零，不会触发空队列问题。最后仍以根目录 `coverage_report.json` 验收。
+`rerun-incomplete-*` 会补跑已有 checkpoint 的 TIMEOUT、unresolved process failure 和无可靠 case 报告的 FAIL，但不会补跑完全缺少 checkpoint 的 MISSING。存在 MISSING 时仍要使用普通 resume。最后仍以根目录 `coverage_report.json` 验收。
 
 ### 8.3 停止跑错的后台任务
 
