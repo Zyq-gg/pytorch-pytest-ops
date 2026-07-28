@@ -65,6 +65,34 @@ DIST_WORK_DIR=${DIST_WORK_DIR:-/home/tmp/torch2.13/run_test_official_distributed
 FAILURE_CSV=${FAILURE_CSV:-}
 FAILURE_WORK_DIR=${FAILURE_WORK_DIR:-/home/tmp/torch2.13/run_test_official_failure_rerun_nmz}
 
+RUNNER_TS=$(date +%Y%m%d_%H%M%S)
+
+start_nohup() {
+  local out_dir=$1
+  local log_prefix=$2
+  shift 2
+  mkdir -p "$out_dir"
+  local out_file="$out_dir/${log_prefix}_${RUNNER_TS}_$$.out"
+  nohup env PYTHONUNBUFFERED=1 "$@" > "$out_file" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$out_dir/${log_prefix}_${RUNNER_TS}_$$.pid"
+  ln -sfn "$(basename "$out_file")" "$out_dir/${log_prefix}_latest.out"
+  echo "started pid=$pid"
+  echo "runner: $out_file"
+}
+
+tail_latest_runner() {
+  local out_dir=$1
+  local pattern=$2
+  local latest
+  latest=$(find "$out_dir" -maxdepth 1 -type f -name "$pattern" -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {print $2}')
+  if [[ -z "$latest" ]]; then
+    latest="$out_dir/runner.out"
+  fi
+  echo "runner: $latest"
+  tail -80 "$latest" 2>/dev/null || true
+}
+
 QUEUE_FILTER_ARGS=()
 if [[ -n "$INCLUDE_REGEX" ]]; then
   QUEUE_FILTER_ARGS+=(--include-regex "$INCLUDE_REGEX")
@@ -107,7 +135,7 @@ case "$cmd" in
 
   run-normal)
     mkdir -p "$NORMAL_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$NORMAL_WORK_DIR" runner_run python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$NORMAL_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
@@ -115,38 +143,29 @@ case "$cmd" in
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${COMMON_RUN_TEST_ARGS[@]}" \
-      > "$NORMAL_WORK_DIR/runner.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $NORMAL_WORK_DIR/runner.out"
+      -- "${COMMON_RUN_TEST_ARGS[@]}"
     ;;
 
   resume-normal)
     mkdir -p "$NORMAL_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$NORMAL_WORK_DIR" runner_resume python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$NORMAL_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
       --idle-timeout "$IDLE_TIMEOUT" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${COMMON_RUN_TEST_ARGS[@]}" \
-      > "$NORMAL_WORK_DIR/runner_resume.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $NORMAL_WORK_DIR/runner_resume.out"
+      -- "${COMMON_RUN_TEST_ARGS[@]}"
     ;;
 
   rerun-incomplete-normal)
     mkdir -p "$NORMAL_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$NORMAL_WORK_DIR" runner_incomplete_rerun python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$NORMAL_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --process-rerun-only \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${COMMON_RUN_TEST_ARGS[@]}" \
-      > "$NORMAL_WORK_DIR/runner_incomplete_rerun.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $NORMAL_WORK_DIR/runner_incomplete_rerun.out"
+      -- "${COMMON_RUN_TEST_ARGS[@]}"
     ;;
 
   dry-run-distributed)
@@ -162,7 +181,7 @@ case "$cmd" in
 
   run-distributed)
     mkdir -p "$DIST_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$DIST_WORK_DIR" runner_run python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$DIST_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
@@ -171,15 +190,12 @@ case "$cmd" in
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${DIST_RUN_TEST_ARGS[@]}" \
-      > "$DIST_WORK_DIR/runner.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $DIST_WORK_DIR/runner.out"
+      -- "${DIST_RUN_TEST_ARGS[@]}"
     ;;
 
   resume-distributed)
     mkdir -p "$DIST_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$DIST_WORK_DIR" runner_resume python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$DIST_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
@@ -187,24 +203,18 @@ case "$cmd" in
       --idle-timeout "$IDLE_TIMEOUT" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${DIST_RUN_TEST_ARGS[@]}" \
-      > "$DIST_WORK_DIR/runner_resume.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $DIST_WORK_DIR/runner_resume.out"
+      -- "${DIST_RUN_TEST_ARGS[@]}"
     ;;
 
   rerun-incomplete-distributed)
     mkdir -p "$DIST_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$DIST_WORK_DIR" runner_incomplete_rerun python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$DIST_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
       --process-rerun-only \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${DIST_RUN_TEST_ARGS[@]}" \
-      > "$DIST_WORK_DIR/runner_incomplete_rerun.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $DIST_WORK_DIR/runner_incomplete_rerun.out"
+      -- "${DIST_RUN_TEST_ARGS[@]}"
     ;;
 
   run-normal-failures)
@@ -213,7 +223,7 @@ case "$cmd" in
       exit 2
     fi
     mkdir -p "$FAILURE_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$FAILURE_WORK_DIR" runner_run python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$FAILURE_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
@@ -222,10 +232,7 @@ case "$cmd" in
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${COMMON_RUN_TEST_ARGS[@]}" \
-      > "$FAILURE_WORK_DIR/runner.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $FAILURE_WORK_DIR/runner.out"
+      -- "${COMMON_RUN_TEST_ARGS[@]}"
     ;;
 
   resume-normal-failures)
@@ -234,7 +241,7 @@ case "$cmd" in
       exit 2
     fi
     mkdir -p "$FAILURE_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$FAILURE_WORK_DIR" runner_resume python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$FAILURE_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --timeout "$TIMEOUT" \
@@ -242,10 +249,7 @@ case "$cmd" in
       --failure-csv "$FAILURE_CSV" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${COMMON_RUN_TEST_ARGS[@]}" \
-      > "$FAILURE_WORK_DIR/runner_resume.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $FAILURE_WORK_DIR/runner_resume.out"
+      -- "${COMMON_RUN_TEST_ARGS[@]}"
     ;;
 
   run-distributed-failures)
@@ -254,7 +258,7 @@ case "$cmd" in
       exit 2
     fi
     mkdir -p "$FAILURE_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$FAILURE_WORK_DIR" runner_run python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$FAILURE_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
@@ -264,10 +268,7 @@ case "$cmd" in
       --fresh \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${DIST_RUN_TEST_ARGS[@]}" \
-      > "$FAILURE_WORK_DIR/runner.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $FAILURE_WORK_DIR/runner.out"
+      -- "${DIST_RUN_TEST_ARGS[@]}"
     ;;
 
   resume-distributed-failures)
@@ -276,7 +277,7 @@ case "$cmd" in
       exit 2
     fi
     mkdir -p "$FAILURE_WORK_DIR"
-    nohup env PYTHONUNBUFFERED=1 python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
+    start_nohup "$FAILURE_WORK_DIR" runner_resume python3 -u "$QUEUE_RUNNER" "$PYTORCH_ROOT" \
       --work-dir "$FAILURE_WORK_DIR" \
       --gpu-ids "$GPU_IDS" \
       --no-bind-gpu \
@@ -285,10 +286,7 @@ case "$cmd" in
       --failure-csv "$FAILURE_CSV" \
       "${QUEUE_FILTER_ARGS[@]}" \
       "${PROCESS_RERUN_ARGS[@]}" \
-      -- "${DIST_RUN_TEST_ARGS[@]}" \
-      > "$FAILURE_WORK_DIR/runner_resume.out" 2>&1 &
-    echo "started pid=$!"
-    echo "runner: $FAILURE_WORK_DIR/runner_resume.out"
+      -- "${DIST_RUN_TEST_ARGS[@]}"
     ;;
 
   status-normal)
@@ -296,7 +294,7 @@ case "$cmd" in
     ps -ef | grep -E 'run_official_run_test_queue|run_test.py' | grep -v grep || true
     echo
     echo "runner tail:"
-    tail -80 "$NORMAL_WORK_DIR/runner.out" 2>/dev/null || true
+    tail_latest_runner "$NORMAL_WORK_DIR" "runner_*.out"
     echo
     echo "progress:"
     python3 - <<PY
@@ -318,7 +316,7 @@ PY
     ps -ef | grep -E 'run_official_run_test_queue|run_test.py' | grep -v grep || true
     echo
     echo "runner tail:"
-    tail -80 "$DIST_WORK_DIR/runner.out" 2>/dev/null || true
+    tail_latest_runner "$DIST_WORK_DIR" "runner_*.out"
     echo
     echo "progress:"
     python3 - <<PY

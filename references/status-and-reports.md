@@ -17,7 +17,7 @@ test -z "${RUNNER_LOG:-}" || tail -100 "$RUNNER_LOG"
 ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 ```
 
-不要固定只看 `runner.out`：续跑通常写 `runner_resume.out`，只补跑不完整模块通常写 `runner_incomplete_rerun.out`。
+不要固定只看 `runner.out`：shell 包装器会写带时间戳和 shell pid 的 `runner_run_*.out`、`runner_resume_*.out`、`runner_incomplete_rerun_*.out`，并维护对应的 `*_latest.out` symlink。
 
 进程查询只反映当前机器。如果 work-dir 位于共享存储，而任务实际运行在另一节点，应以制品检查进度，并到实际执行节点确认进程。
 
