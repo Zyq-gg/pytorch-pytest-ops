@@ -2,6 +2,7 @@ import csv
 import importlib.util
 import json
 import os
+import queue
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,38 @@ SPEC.loader.exec_module(QUEUE)
 
 
 class OfficialQueueCompletionTest(unittest.TestCase):
+    def test_worker_streams_binary_output_without_textio_nonblocking_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            test_dir = root / "test"
+            log_dir = root / "logs"
+            test_dir.mkdir()
+            log_dir.mkdir()
+            (test_dir / "run_test.py").write_text(
+                "import sys\nprint('child output')\nsys.exit(1)\n",
+                encoding="utf-8",
+            )
+            work_queue: queue.Queue[tuple[int, str]] = queue.Queue()
+            work_queue.put((0, "test_failure"))
+
+            result = QUEUE.run_one(
+                worker_idx=0,
+                gpu_id=None,
+                work_queue=work_queue,
+                total=1,
+                test_dir=test_dir,
+                log_dir=log_dir,
+                progress_file=root / "progress.json",
+                hard_timeout=5,
+                idle_timeout=5,
+                run_test_args=[],
+            )
+
+            log_text = (log_dir / "run_test_gpu_all.log").read_text(encoding="utf-8")
+            self.assertEqual(result["failed"], 1)
+            self.assertIn("child output", log_text)
+            self.assertNotIn("runner exception", log_text)
+
     def test_empty_queue_is_a_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)

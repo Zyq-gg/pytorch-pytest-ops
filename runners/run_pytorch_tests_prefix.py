@@ -60,14 +60,26 @@ SHORT_SUMMARY_RE = re.compile(r"\bshort test summary info\b", re.IGNORECASE)
 FAILED_RE = re.compile(r"^FAILED(?:\s+\[[^\]]+\])?\s+(.+?)(?:\s+-\s+(.+))?$")
 FAILED_CONSISTENTLY_RE = re.compile(r"FAILED CONSISTENTLY:\s+(.+)$")
 FAILED_CONSISTENTLY_LIST_MARKER = "The following tests failed consistently:"
-RUNNING_ITEMS_RE = re.compile(r"Running\s+\d+\s+items?\s+in this shard:\s+(.+)$")
+RUNNING_ITEMS_RE = re.compile(
+    r"Running\s+(?P<count>\d+)\s+items?\s+in this shard:\s+(?P<items>.+)$"
+)
 NODEID_IN_LINE_RE = re.compile(r"(?P<nodeid>(?:test/)?[\w./+-]+\.py::[^\s]+)")
+UNITTEST_FAILED_LIST_RE = re.compile(
+    r"AssertionError:\s+\d+\s+unit test\(s\) failed:\s*$"
+)
+SINGLE_TEST_EXIT_RE = re.compile(
+    r"Test exited with non-zero exitcode\s+(?P<returncode>-?\d+)\.\s+"
+    r"Command to reproduce:.*?--pytest-single-test(?:=|\s+)"
+    r"(?P<nodeid>(?:test/)?[\w./+-]+\.py::[^\s]+)"
+)
 DIVIDER_RE = re.compile(r"^[=\-_\s]+$")
 STATS_RE = re.compile(
     r"^\d+\s+(failed|passed|skipped|xfailed|xpassed|error|errors|warnings?)\b",
     re.IGNORECASE,
 )
-START_RE = re.compile(r"^===== .* START: (.+?) \[\d+/\d+\] \(GPU (\d+)\) =====$")
+START_RE = re.compile(
+    r"^===== .* START: (.+?) \[\d+/\d+\] \(GPU (\d+|all)\) =====$"
+)
 END_RE = re.compile(r"^===== .* (PASS|FAIL|SKIP|TIMEOUT): (.+?)(?: \(|$)")
 STEPCURRENT_RECOVERY_DONE_RE = re.compile(
     r"^===== STEPCURRENT RECOVERY DONE: (.+?), iterations=\d+, failed=(?:True|False) =====$"
@@ -1255,7 +1267,7 @@ def iter_log_files(path: str) -> list[str]:
 
 
 def parse_gpu_from_log(source_log: str) -> str:
-    match = re.search(r"gpu_(\d+)\.log$", os.path.basename(source_log))
+    match = re.search(r"gpu_(\d+|all)\.log$", os.path.basename(source_log))
     return match.group(1) if match else ""
 
 
@@ -1482,6 +1494,7 @@ def parse_failed_consistently_tests(text: str) -> list[str]:
 def strip_distributed_log_prefix(line: str) -> str:
     line = strip_ansi(line).strip()
     line = re.sub(r"^\[rank\d+\]:[EWI]\d{4}\s+\S+\s+\d+\s+[^\]]+\]\s*", "", line)
+    line = re.sub(r"^\[rank\d+\]:\s*", "", line)
     line = re.sub(r"^[IWE]\d{4}\s+\S+\s+\d+\s+[^\]]+\]\s*", "", line)
     return line.strip()
 
@@ -1578,8 +1591,15 @@ def split_error_loose(error: str) -> tuple[str, str]:
     return "", error
 
 
-def find_run_test_failure_window(lines: list[str], nodeid: str) -> tuple[int, str]:
+def find_run_test_failure_window(
+    lines: list[str], nodeid: str, failure_idx: int | None = None
+) -> tuple[int, str]:
     variants = [nodeid, f"test/{nodeid}"]
+    if failure_idx is not None:
+        start = max(0, failure_idx - 260)
+        end = min(len(lines), failure_idx + 40)
+        return failure_idx + 1, "\n".join(lines[start:end])
+
     best_idx = -1
 
     for idx, line in enumerate(lines):
@@ -1596,7 +1616,6 @@ def find_run_test_failure_window(lines: list[str], nodeid: str) -> tuple[int, st
         for idx, line in enumerate(lines):
             if any(variant in line for variant in variants):
                 best_idx = idx
-                break
 
     if best_idx < 0:
         return -1, ""
@@ -1624,7 +1643,9 @@ def find_run_test_case_window(lines: list[str], nodeid: str, failure_idx: int) -
     for idx in range(session_start, failure_idx + 1):
         line = strip_distributed_log_prefix(lines[idx])
         running = RUNNING_ITEMS_RE.search(line)
-        if running and any(variant in running.group(1) for variant in variants):
+        if running and any(
+            variant in running.group("items") for variant in variants
+        ):
             case_start = idx
             break
         if any(line.startswith(variant) for variant in variants):
@@ -1644,9 +1665,18 @@ def find_run_test_case_window(lines: list[str], nodeid: str, failure_idx: int) -
     return "\n".join(lines[case_start:session_end])
 
 
-def parse_official_run_test_failure(nodeid: str, source_log: str, text: str) -> dict[str, str]:
+def parse_official_run_test_failure(
+    nodeid: str,
+    source_log: str,
+    text: str,
+    *,
+    failure_idx: int | None = None,
+    error_type_hint: str = "",
+    error_message_hint: str = "",
+    raw_hint: str = "",
+) -> dict[str, str]:
     lines = strip_ansi(text).splitlines()
-    line_no, window = find_run_test_failure_window(lines, nodeid)
+    line_no, window = find_run_test_failure_window(lines, nodeid, failure_idx)
     case_window = find_run_test_case_window(lines, nodeid, line_no - 1)
     error = concise_run_test_error(case_window) if case_window else ""
     if not error:
@@ -1654,8 +1684,11 @@ def parse_official_run_test_failure(nodeid: str, source_log: str, text: str) -> 
         # custom handlers and incomplete logs without normal pytest boundaries.
         error = concise_run_test_error(window)
     error_type, error_message = split_error_loose(error)
+    if error_type_hint:
+        error_type = error_type_hint
+        error_message = error_message_hint
     test_file, class_name, case_name, case_params = split_nodeid(nodeid)
-    raw = f"FAILED: test/{nodeid}"
+    raw = raw_hint or f"FAILED: test/{nodeid}"
     if line_no > 0:
         raw = f"{raw} (near line {line_no})"
 
@@ -1680,13 +1713,69 @@ def extract_official_run_test_failures(text: str, source_log: str) -> list[dict[
     ]
 
 
+def extract_official_structured_failures(
+    text: str, source_log: str
+) -> list[dict[str, str]]:
+    """Extract case failures from run_test.py wrappers without pytest FAILED lines."""
+    lines = strip_ansi(text).splitlines()
+    observations: dict[str, dict[str, str | int]] = {}
+
+    for idx, raw_line in enumerate(lines):
+        line = strip_distributed_log_prefix(raw_line)
+        exit_match = SINGLE_TEST_EXIT_RE.search(line)
+        if exit_match:
+            nodeid = normalize_run_test_nodeid(exit_match.group("nodeid"))
+            returncode = int(exit_match.group("returncode"))
+            observations[nodeid] = {
+                "failure_idx": idx,
+                "error_type": "Timeout" if returncode == 124 else "",
+                "error_message": (
+                    "official single-test subprocess exited with code 124"
+                    if returncode == 124
+                    else ""
+                ),
+                "raw": line,
+            }
+
+        if not UNITTEST_FAILED_LIST_RE.search(line):
+            continue
+        for item_idx in range(idx + 1, min(len(lines), idx + 50)):
+            item = strip_distributed_log_prefix(lines[item_idx]).strip()
+            match = NODEID_IN_LINE_RE.fullmatch(item)
+            if not match:
+                break
+            nodeid = normalize_run_test_nodeid(match.group("nodeid"))
+            previous = observations.get(nodeid, {})
+            observations[nodeid] = {
+                "failure_idx": item_idx,
+                "error_type": previous.get("error_type", ""),
+                "error_message": previous.get("error_message", ""),
+                "raw": item,
+            }
+
+    rows: list[dict[str, str]] = []
+    for nodeid, observation in observations.items():
+        rows.append(
+            parse_official_run_test_failure(
+                nodeid,
+                source_log,
+                text,
+                failure_idx=int(observation["failure_idx"]),
+                error_type_hint=str(observation["error_type"]),
+                error_message_hint=str(observation["error_message"]),
+                raw_hint=str(observation["raw"]),
+            )
+        )
+    return rows
+
+
 def extract_pytest_summary_failures(text: str, source_log: str, *, official: bool = False) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     if official:
         seen: set[str] = set()
         for raw_line in strip_ansi(text).splitlines():
-            line = raw_line.strip()
-            if not line.startswith("FAILED"):
+            line = strip_distributed_log_prefix(raw_line)
+            if not line.startswith(("FAILED", "ERROR")):
                 continue
             match = NODEID_IN_LINE_RE.search(line)
             if not match:
@@ -1715,9 +1804,13 @@ def extract_official_timeout_current_failures(text: str, source_log: str) -> lis
     for raw_line in strip_ansi(text).splitlines():
         line = raw_line.strip()
 
+        start = START_RE.match(line)
+        if start:
+            last_nodeid = ""
+
         running = RUNNING_ITEMS_RE.search(line)
-        if running:
-            matches = NODEID_IN_LINE_RE.findall(running.group(1))
+        if running and running.group("count") == "1":
+            matches = NODEID_IN_LINE_RE.findall(running.group("items"))
             if matches:
                 last_nodeid = normalize_run_test_nodeid(matches[-1])
 
@@ -1725,7 +1818,11 @@ def extract_official_timeout_current_failures(text: str, source_log: str) -> lis
         if node_match:
             last_nodeid = normalize_run_test_nodeid(node_match.group("nodeid"))
 
-        if line.startswith("===== TIMEOUT after ") and last_nodeid and last_nodeid not in seen:
+        end = END_RE.match(line)
+        is_timeout = line.startswith("===== TIMEOUT after ") or (
+            end is not None and end.group(1) == "TIMEOUT"
+        )
+        if is_timeout and last_nodeid and last_nodeid not in seen:
             rows.append(
                 make_case_failure_row(
                     source_log=source_log,
@@ -1754,6 +1851,7 @@ def is_official_run_test_log(text: str) -> bool:
 def extract_process_failures(text: str, source_log: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     current_test = ""
+    current_nodeid = ""
     current_gpu = parse_gpu_from_log(source_log)
     recorded_for_current = False
 
@@ -1764,8 +1862,19 @@ def extract_process_failures(text: str, source_log: str) -> list[dict[str, str]]
         if start:
             current_test = start.group(1)
             current_gpu = start.group(2)
+            current_nodeid = ""
             recorded_for_current = False
             continue
+
+        running = RUNNING_ITEMS_RE.search(line)
+        if running and running.group("count") == "1":
+            matches = NODEID_IN_LINE_RE.findall(running.group("items"))
+            if matches:
+                current_nodeid = normalize_run_test_nodeid(matches[-1])
+
+        node_match = NODEID_IN_LINE_RE.match(strip_distributed_log_prefix(line))
+        if node_match:
+            current_nodeid = normalize_run_test_nodeid(node_match.group("nodeid"))
 
         end = END_RE.match(line)
         if end:
@@ -1783,6 +1892,7 @@ def extract_process_failures(text: str, source_log: str) -> list[dict[str, str]]
                     )
                 )
             current_test = ""
+            current_nodeid = ""
             recorded_for_current = False
             continue
 
@@ -1791,17 +1901,28 @@ def extract_process_failures(text: str, source_log: str) -> list[dict[str, str]]
 
         crash = CRASH_RE.search(line)
         if crash:
-            rows.append(
-                make_failure_row(
-                    source_log=source_log,
-                    gpu=current_gpu,
-                    test_file=current_test,
-                    error_type="Crash",
-                    error_message=crash.group(1),
-                    nodeid=current_test,
-                    raw=line,
+            if current_nodeid:
+                rows.append(
+                    make_case_failure_row(
+                        source_log=source_log,
+                        nodeid=current_nodeid,
+                        error_type="Crash",
+                        error_message=crash.group(1),
+                        raw=line,
+                    )
                 )
-            )
+            else:
+                rows.append(
+                    make_failure_row(
+                        source_log=source_log,
+                        gpu=current_gpu,
+                        test_file=current_test,
+                        error_type="Crash",
+                        error_message=crash.group(1),
+                        nodeid=current_test,
+                        raw=line,
+                    )
+                )
             recorded_for_current = True
 
     return rows
@@ -1809,17 +1930,44 @@ def extract_process_failures(text: str, source_log: str) -> list[dict[str, str]]
 
 def extract_global_crashes(text: str, source_log: str) -> list[dict[str, str]]:
     current_gpu = parse_gpu_from_log(source_log)
+    current_module = ""
+    current_nodeid = ""
     current_test_file = ""
 
     for raw_line in strip_ansi(text).splitlines():
         line = raw_line.strip()
+        start = START_RE.match(line)
+        if start:
+            current_module = start.group(1)
+            current_gpu = start.group(2)
+            current_nodeid = ""
+            current_test_file = ""
+
+        running = RUNNING_ITEMS_RE.search(line)
+        if running and running.group("count") == "1":
+            matches = NODEID_IN_LINE_RE.findall(running.group("items"))
+            if matches:
+                current_nodeid = normalize_run_test_nodeid(matches[-1])
+
+        node_match = NODEID_IN_LINE_RE.match(line)
+        if node_match:
+            current_nodeid = normalize_run_test_nodeid(node_match.group("nodeid"))
+
         file_match = PY_FILE_RE.search(line)
-        if file_match:
+        if file_match and "site-packages/" not in file_match.group("file"):
             current_test_file = file_match.group("file")
 
         crash = CRASH_RE.search(line)
         if crash:
-            test_file = current_test_file or "<process>"
+            test_file = (
+                current_nodeid.split("::", 1)[0]
+                if current_nodeid
+                else (
+                    current_module + ("" if current_module.endswith(".py") else ".py")
+                    if current_module
+                    else current_test_file or "<process>"
+                )
+            )
             return [
                 make_failure_row(
                     source_log=source_log,
@@ -1848,6 +1996,11 @@ def failure_row_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
 def canonical_test_name(name: str) -> str:
     name = name.strip()
     return name[len("test/") :] if name.startswith("test/") else name
+
+
+def canonical_test_module(name: str) -> str:
+    name = canonical_test_name(name)
+    return name[:-3] if name.endswith(".py") else name
 
 
 def canonicalize_failure_row(row: dict[str, str]) -> dict[str, str]:
@@ -1903,33 +2056,66 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
         is_official = is_official_run_test_log(text)
         official_rows = extract_official_run_test_failures(text, log_file)
         summary_rows = extract_pytest_summary_failures(text, log_file, official=is_official)
+        structured_rows = (
+            extract_official_structured_failures(text, log_file)
+            if is_official
+            else []
+        )
+        known_case_nodeids = {
+            row.get("nodeid", "") for row in official_rows + summary_rows
+        }
+        structured_rows = [
+            row
+            for row in structured_rows
+            if row.get("nodeid", "") not in known_case_nodeids
+        ]
         timeout_rows = extract_official_timeout_current_failures(text, log_file) if is_official else []
         if is_official:
             # Stable run_test.py summaries are authoritative, but a shared
             # worker log can also contain a different module that terminated
             # before producing its final summary. Keep pytest nodeids as a
             # recall-first fallback instead of dropping the whole category.
-            parsed_rows = official_rows + summary_rows + timeout_rows
+            parsed_rows = official_rows + summary_rows + structured_rows + timeout_rows
         else:
             parsed_rows = summary_rows
         has_case_rows = any("::" in row.get("nodeid", "") for row in parsed_rows)
         raw_process_rows = extract_process_failures(text, log_file)
         recovered_files_in_log = completed_recovery_files(text)
+        recovered_modules_in_log = {
+            canonical_test_module(test_file) for test_file in recovered_files_in_log
+        }
         process_rows = [
             row
             for row in raw_process_rows
-            if row["test_file"] not in recovered_files_in_log
+            if canonical_test_module(row["test_file"]) not in recovered_modules_in_log
         ]
-        if not (is_official and has_case_rows):
+        if is_official and has_case_rows:
+            case_modules = {
+                canonical_test_module(row.get("test_file", ""))
+                for row in parsed_rows
+                if "::" in row.get("nodeid", "")
+            }
+            parsed_rows.extend(
+                row
+                for row in process_rows
+                if canonical_test_module(row.get("test_file", ""))
+                not in case_modules
+            )
+        else:
             parsed_rows.extend(process_rows)
         if (
             not raw_process_rows
-            and not recovered_files_in_log
             and not official_rows
             and not summary_rows
+            and not structured_rows
             and not timeout_rows
         ):
-            parsed_rows.extend(extract_global_crashes(text, log_file))
+            parsed_rows.extend(
+                row
+                for row in extract_global_crashes(text, log_file)
+                if canonical_test_module(row["test_file"])
+                not in recovered_modules_in_log
+            )
 
         for row in parsed_rows:
             key = failure_row_key(row)
@@ -1937,8 +2123,8 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
                 rows.append(row)
                 seen.add(key)
 
-    recovered_files = {
-        row["test_file"]
+    recovered_modules = {
+        canonical_test_module(row["test_file"])
         for row in rows
         if row["nodeid"].startswith(f"{row['test_file']}::")
     }
@@ -1947,7 +2133,7 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
         for row in rows
         if not (
             row["error_type"] in {"Crash", "Timeout"}
-            and row["test_file"] in recovered_files
+            and canonical_test_module(row["test_file"]) in recovered_modules
             and row["nodeid"] == row["test_file"]
         )
     ]

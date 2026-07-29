@@ -1469,7 +1469,7 @@ python3 run_test.py --include <module> --distributed-tests --continue-through-er
 
 ### 5.6 distributed 失败 case 抽取逻辑
 
-当前解析器会对 official `run_test.py` 日志做三类抽取，原则是 case 召回优先：宁可保留少量后来通过的 flaky case，也不能因为官方汇总不完整而丢掉已经在日志中出现的失败 nodeid。
+当前解析器会对 official `run_test.py` 日志做四类抽取，原则是 case 召回优先：宁可保留少量后来通过的 flaky case，也不能因为官方汇总不完整而丢掉已经在日志中出现的失败 nodeid。
 
 1. 抽取官方稳定失败：
 
@@ -1480,7 +1480,7 @@ The following tests failed consistently: [...]
 
 这两种文本都由官方 `run_test.py` 产生，来自同一个失败计数器。一个 case 连续失败三次时立即打印 `FAILED CONSISTENTLY`；模块结束时再用 `The following tests failed consistently` 汇总同一批 case。解析器按 nodeid 去重。
 
-2. 同时解析普通 pytest case 行作为兜底，而不是只有完全没有稳定汇总时才解析：
+2. 同时解析普通 pytest case 行作为兜底，而不是只有完全没有稳定汇总时才解析；`FAILED`、`ERROR` 和 distributed rank 前缀都会识别：
 
 ```text
 short test summary info
@@ -1495,6 +1495,18 @@ FAILED ... test/distributed/xxx.py::Class::case
 Running 1 items in this shard: test/distributed/xxx.py::Class::case
 ```
 
+这里只使用 `Running 1 item` 的当前单 case 行，不把 `Running 224 items ...` 一类模块计划清单误认成最后执行项；队列的 `GPU all` 不绑定模式也会保留在报告的 `gpu` 字段中。
+
+4. 解析 official 单 case 子进程的结构化失败文本，即使它没有输出普通 pytest `FAILED`：
+
+```text
+Test exited with non-zero exitcode 124. Command to reproduce: ... --pytest-single-test distributed/xxx.py::Class::case
+AssertionError: 1 unit test(s) failed:
+        distributed/xxx.py::Class::case
+```
+
+返回码 `124` 归类为具体 case 的 `Timeout`。这类文本常见于 distributed custom handler：子进程先 timeout，随后 traceback/VMFault 打断官方稳定失败汇总；旧解析器虽然能看见 nodeid，却因为它不在前三类标记中而最终只生成 `<process-failure>`。
+
 只要能找到 case 级 `nodeid`，报告器会优先保留具体 case；文件级异常单独留在 unresolved，而不是用下面这种旧占位行代替具体 case：
 
 ```text
@@ -1503,7 +1515,7 @@ common_distributed.py <crash>
 
 这种旧的 process-level 兜底行。
 
-确定 nodeid 后，错误信息优先从该 case 所在的 pytest session/case 区间提取，避免相邻 session 的 VMFault、异常或 traceback 串到当前 case；结构不完整的 custom-handler/中断日志提取不到时，仍回退到原来的前 260、后 40 行宽窗口，避免错误字段收紧导致 case 行本身被遗漏。因此 `nodeid` 是主要结论，`error_type/error_message` 是尽力归类字段；distributed 多 rank 交错日志仍应通过 `source_log` 和 `raw` 回查。
+确定 nodeid 后，错误信息优先从该 case 所在的 pytest session/case 区间提取，避免相邻 session 的 VMFault、异常或 traceback 串到当前 case；结构不完整的 custom-handler/中断日志提取不到时，仍回退到原来的前 260、后 40 行宽窗口，避免错误字段收紧导致 case 行本身被遗漏。共享 worker 日志中的 process crash 按模块分别过滤：某个模块已有具体 case，不会误删另一个模块的 process crash；同一模块的有/无 `.py` 表示会先规范化再比较。因此 `nodeid` 是主要结论，`error_type/error_message` 是尽力归类字段；distributed 多 rank 交错日志仍应通过 `source_log` 和 `raw` 回查。
 
 ### 5.7 查看状态和确认结束
 
@@ -1766,9 +1778,9 @@ cat /home/tmp/torch2.13/run_test_official_nmz/incomplete_modules.txt
 
 官方 `run_test.py` 对普通 pytest 模块使用 `-x + --sc + --rs/--scs`：当前 case 新进程通过后继续后续 case；连续失败三次输出 `FAILED CONSISTENTLY`，并在 keep-going 模式下跳过该 case继续。队列外层使用非阻塞日志读取，timeout 时终止整个进程组并写 synthetic Timeout 行。
 
-失败 case 抽取采用召回优先合并：官方 `FAILED CONSISTENTLY`/最终稳定汇总和普通 pytest `FAILED file.py::case` 都会进入候选，按规范化 nodeid 去重。这样即使某个模块在最终稳定汇总前 crash/timeout，已经输出的失败 case 也不会因为同一 worker 日志中另一个模块存在稳定汇总而被舍弃。代价是重试后通过的普通 FAILED 也可能保留在初始报告中；需要精确稳定失败集合时，继续使用稳定失败重测，不要把初始 `failure_report.csv` 等同于“连续失败 N 次”的结论。
+失败 case 抽取采用召回优先合并：官方 `FAILED CONSISTENTLY`/最终稳定汇总、普通 pytest `FAILED/ERROR file.py::case`、`Running 1 item` 外层 timeout，以及 `--pytest-single-test`/`AssertionError: N unit test(s) failed` 结构化文本都会进入候选，按规范化 nodeid 去重。这样即使某个模块在最终稳定汇总前 crash/timeout，已经输出的失败 case 也不会因为同一 worker 日志中另一个模块存在稳定汇总而被舍弃。代价是重试后通过的普通 FAILED 也可能保留在初始报告中；需要精确稳定失败集合时，继续使用稳定失败重测，不要把初始 `failure_report.csv` 等同于“连续失败 N 次”的结论。
 
-错误类型和错误消息先在对应 nodeid 的 pytest session/case 区间内提取，找不到信号才回退到宽日志窗口。最终报告应优先相信 nodeid；复杂 distributed 多 rank 输出中的 `error_type/error_message` 仍属于辅助诊断字段。
+错误类型和错误消息先在对应 nodeid 的 pytest session/case 区间内提取，找不到信号才回退到宽日志窗口；official 子进程返回码 `124` 会明确归类为 case 级 `Timeout`。队列日志使用原始 bytes 非阻塞读取后增量 UTF-8 解码，避免对 `TextIOWrapper` 设置非阻塞后出现 `TypeError: can't concat NoneType to bytes` 并覆盖真正的子进程结尾。最终报告应优先相信 nodeid；复杂 distributed 多 rank 输出中的 `error_type/error_message` 仍属于辅助诊断字段。
 
 若官方进程在导入/收集、首个 item 前崩溃，官方也可能没有 stepcurrent case。队列会把“checkpoint 为 FAIL 且该模块没有任何可解析失败行”视为疑似进程级中断并完整重跑；最终仍无 case 时保留 `<process-failure>` unresolved 文件级记录，不会静默删除。常见来源包括 custom-handler 的扩展构建失败、模块导入 `ImportError/NameError`，以及特殊 handler 自身返回非零。这些情况客观上没有已执行的 pytest case，不能伪造 `Class::case`。
 

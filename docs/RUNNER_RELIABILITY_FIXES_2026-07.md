@@ -121,6 +121,30 @@ ValueError: max_workers must be greater than 0
 
 这些错误已经通过准确补充类型和显式分支消除，没有通过全局忽略隐藏。当前 `mypy runners scripts` 对 7 个源码文件检查通过。
 
+### 7. distributed custom handler 已打印 nodeid 仍落为 process failure
+
+实际 distributed 日志存在一种不经过普通 pytest `FAILED` 或官方稳定失败汇总的结尾：
+
+```text
+Test exited with non-zero exitcode 124. Command to reproduce: ... --pytest-single-test file.py::Class::case
+AssertionError: 1 unit test(s) failed:
+        file.py::Class::case
+```
+
+原解析器的 nodeid 正则能匹配该文本，但抽取入口只接受稳定失败、普通 `FAILED` 和外层 timeout 当前项，因此 nodeid 没有进入报告。随后 `GPU all` 不被 `START`/文件名正则识别，VMFault 又会被最后一个 Python traceback 文件（常为 `common_distributed.py`）错误归属；checkpoint 模块过滤掉该错误行，最终合成 `<process-failure>`。
+
+同一日志还暴露出队列输出读取问题：对 text-mode `proc.stdout` 设置非阻塞后，`TextIOWrapper.read()` 在底层暂时无数据时可能返回不完整内部状态，触发 `TypeError: can't concat NoneType to bytes`，使 runner 追加二次异常。
+
+修复后：
+
+- 从 `--pytest-single-test` 复现命令和 `AssertionError: N unit test(s) failed` 列表提取具体 nodeid；
+- 子进程返回码 `124` 归类为 case 级 `Timeout`；
+- 识别 `GPU all`、rank 前缀 `FAILED/ERROR` 和外层 `TIMEOUT`；
+- 只把 `Running 1 item` 当作当前 case，忽略整模块 item 计划；
+- crash 优先归属当前 case/模块，不使用 site-packages traceback 文件；
+- 共享 worker 日志按规范化模块名过滤 process 行，避免一个模块的具体 case 误删另一个模块的 crash，也避免 `.py` 后缀差异留下重复 unresolved；
+- subprocess pipe 改为 bytes 非阻塞读取和增量 UTF-8 解码。
+
 ## 关键行为对照
 
 | 场景 | 修复前 | 修复后 |
@@ -133,6 +157,9 @@ ValueError: max_workers must be greater than 0
 | 计划外旧 checkpoint | 混入状态统计 | 只统计当前计划 |
 | 同目录改变源码/环境/参数 | 依赖人工发现 | manifest 校验失败并拒绝续跑 |
 | 官方包装器再次启动 | 可能覆盖旧输出 | 独立时间戳日志、pid 和 latest symlink |
+| structured distributed timeout | 已有 nodeid 仍变成 `<process-failure>` | 提取具体 case 并归类为 `Timeout` |
+| `GPU all` / rank 前缀 / `ERROR` | 上下文或 case 可能丢失 | 统一识别并保留 |
+| 非阻塞 text pipe | 可能追加 `NoneType` TypeError | bytes 读取并增量解码 |
 | `mypy runners scripts` | 24 个错误 | 7 个源码文件零错误 |
 
 ## 回归覆盖
@@ -151,6 +178,10 @@ ValueError: max_workers must be greater than 0
 - manifest 拒绝新计划后，旧计划文件保持不变；
 - 纯 dry-run 模式推断；
 - 活动本机进程改变 `Run verdict`，但不篡改 `Artifact verdict`。
+- official structured single-test timeout 能定位具体 case；
+- 共享日志不同模块的 case 与 process crash 都被保留，同模块占位行会被具体 case 替代；
+- `GPU all`、rank 前缀 `ERROR` 和只含外层 timeout 的当前 item；
+- queue worker 的非阻塞输出不会再产生 `NoneType` text decoder 异常。
 
 验证命令：
 

@@ -16,6 +16,7 @@ This keeps run_test.py as the execution entrypoint, but adds:
 from __future__ import annotations
 
 import argparse
+import codecs
 import concurrent.futures
 import csv
 import json
@@ -655,14 +656,14 @@ def run_one(
                 env=make_env(gpu_id),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+                bufsize=0,
                 start_new_session=True,
             )
             try:
                 assert proc.stdout is not None
                 fd = proc.stdout.fileno()
                 os.set_blocking(fd, False)
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
                 last_output_at = start
                 while True:
                     now = time.time()
@@ -687,17 +688,29 @@ def run_one(
                         break
                     ready, _, _ = select.select([fd], [], [], 1)
                     if ready:
-                        chunk = proc.stdout.read()
+                        try:
+                            chunk = os.read(fd, 65536)
+                        except BlockingIOError:
+                            chunk = b""
                         if chunk:
-                            log.write(chunk)
+                            log.write(decoder.decode(chunk))
                             last_output_at = time.time()
                         elif proc.poll() is not None:
                             break
                     elif proc.poll() is not None:
                         break
-                rest = proc.stdout.read()
-                if rest:
-                    log.write(rest)
+                while True:
+                    try:
+                        chunk = os.read(fd, 65536)
+                    except (BlockingIOError, OSError):
+                        break
+                    if not chunk:
+                        break
+                    log.write(decoder.decode(chunk))
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    log.write(tail)
+                proc.stdout.close()
                 returncode = proc.wait()
                 if status != "TIMEOUT":
                     status = "PASS" if returncode == 0 else "FAIL"
@@ -706,6 +719,8 @@ def run_one(
                 if proc.poll() is None:
                     os.killpg(proc.pid, signal.SIGKILL)
                 returncode = proc.wait()
+                if proc.stdout is not None:
+                    proc.stdout.close()
                 status = "FAIL"
 
             if status == "TIMEOUT":

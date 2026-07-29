@@ -160,6 +160,113 @@ The following tests failed and then succeeded when run in a new process['test/te
 
         self.assertEqual([row["nodeid"] for row in rows], ["test_flaky.py::Tests::test_flaky"])
 
+    def test_official_structured_single_test_timeout_is_a_concrete_case(self):
+        nodeid = (
+            "distributed/test_c10d_nccl.py::NCCLTraceTest::"
+            "test_allgather_uneven_timing_enabled_False"
+        )
+        text = f"""===== worker 0, GPU all =====
+===== 12:00:00 START: distributed/test_nccl [1/2] (GPU all) =====
+===== 12:00:01 PASS: distributed/test_nccl (1.0s, rc=0) =====
+===== 12:00:02 START: distributed/test_c10d_nccl [2/2] (GPU all) =====
+===== command: python3 run_test.py --include distributed/test_c10d_nccl =====
+Running 1 items in this shard: test/{nodeid}
+Command took >15min, returning 124
+Test exited with non-zero exitcode 124. Command to reproduce: python3 distributed/test_c10d_nccl.py --pytest-single-test {nodeid}
+AssertionError: 1 unit test(s) failed:
+\t{nodeid}
+>>>>>>>> KERNEL VMFault !!!! <<<<<<
+===== 12:15:03 FAIL: distributed/test_c10d_nccl (901.0s, rc=1) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_all.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual([row["nodeid"] for row in rows], [nodeid])
+        self.assertEqual(rows[0]["error_type"], "Timeout")
+        self.assertIn("code 124", rows[0]["error_message"])
+        self.assertEqual(rows[0]["gpu"], "all")
+
+    def test_official_shared_log_keeps_process_crash_for_another_module(self):
+        text = """===== worker 0, GPU all =====
+===== 12:00:00 START: distributed/test_case [1/2] (GPU all) =====
+===== command: python3 run_test.py --include distributed/test_case =====
+Running 1 items in this shard: test/distributed/test_case.py::Tests::test_failure
+FAILED distributed/test_case.py::Tests::test_failure - AssertionError: bad value
+===== 12:00:01 FAIL: distributed/test_case (1.0s, rc=1) =====
+===== 12:00:02 START: distributed/test_import [2/2] (GPU all) =====
+Fatal Python error: Segmentation fault
+===== 12:00:03 FAIL: distributed/test_import (1.0s, rc=1) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_all.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual(
+            {row["nodeid"] for row in rows},
+            {
+                "distributed/test_case.py::Tests::test_failure",
+                "distributed/test_import",
+            },
+        )
+        process_row = next(row for row in rows if row["nodeid"].endswith("test_import"))
+        self.assertEqual(process_row["error_type"], "Crash")
+        self.assertEqual(process_row["gpu"], "all")
+
+    def test_official_rank_prefixed_error_line_is_retained(self):
+        text = """===== command: python3 run_test.py --include distributed/test_error =====
+[rank0]: ============================= test session starts ==============================
+[rank0]: Running 1 items in this shard: test/distributed/test_error.py::Tests::test_setup
+[rank0]: ERROR distributed/test_error.py::Tests::test_setup - RuntimeError: setup failed
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_all.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual(
+            [row["nodeid"] for row in rows],
+            ["distributed/test_error.py::Tests::test_setup"],
+        )
+
+    def test_official_crash_during_known_active_case_is_not_process_level(self):
+        nodeid = "distributed/test_crash.py::Tests::test_active"
+        text = f"""===== worker 0, GPU all =====
+===== 12:00:00 START: distributed/test_crash [1/1] (GPU all) =====
+===== command: python3 run_test.py --include distributed/test_crash =====
+[rank0]: Running 1 item in this shard: test/{nodeid}
+Fatal Python error: Segmentation fault
+===== 12:00:01 FAIL: distributed/test_crash (1.0s, rc=1) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_all.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual([row["nodeid"] for row in rows], [nodeid])
+        self.assertEqual(rows[0]["error_type"], "Crash")
+
+    def test_official_outer_timeout_uses_single_active_case_not_plan_list(self):
+        text = """===== worker 0, GPU all =====
+===== 12:00:00 START: distributed/test_timeout [1/1] (GPU all) =====
+===== command: python3 run_test.py --include distributed/test_timeout =====
+Running 224 items in this shard: test/wrong.py::Tests::test_wrong, test/also_wrong.py::Tests::test_wrong
+Running 1 item in this shard: test/distributed/test_timeout.py::Tests::test_active
+===== 12:15:00 TIMEOUT: distributed/test_timeout (900.0s, idle) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_all.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual(
+            [row["nodeid"] for row in rows],
+            ["distributed/test_timeout.py::Tests::test_active"],
+        )
+        self.assertEqual(rows[0]["error_type"], "Timeout")
+
 
 if __name__ == "__main__":
     unittest.main()
