@@ -145,6 +145,28 @@ AssertionError: 1 unit test(s) failed:
 - 共享 worker 日志按规范化模块名过滤 process 行，避免一个模块的具体 case 误删另一个模块的 crash，也避免 `.py` 后缀差异留下重复 unresolved；
 - subprocess pipe 改为 bytes 非阻塞读取和增量 UTF-8 解码。
 
+### 8. Normal 模块已有 traceback 仍落为 process failure
+
+一次真实 Normal 全量队列的 9 个 unresolved 中，旧解析器对全部目标都返回 0 条日志诊断，随后只根据 checkpoint 合成 `<process-failure>`。日志实际已经包含：
+
+- `NameError`、`ImportError`、`RuntimeError`、`AssertionError` 等 import/collection 异常；
+- DTK Stable ABI 头文件冲突和链接器失败；
+- `TypeError: can't concat NoneType to bytes` runner exception；
+- `test_ci_sanity_check_fail` 这一已知故意失败目标。
+
+修复后，Normal 与 Distributed 共用模块阶段解析：按每个 `START` 到 `FAIL` 区段提取最终 Python 异常、根编译/链接错误或 runner exception，写为 `case_name=<module-stage>`。它表示“模块失败原因已经定位，但不存在 pytest case”，不会伪造 nodeid，也不再计入 unresolved；同模块已有具体 case 时仍以 case 为准。只有日志既没有 case、也没有明确模块阶段诊断时才生成 `<process-failure>`。
+
+真实 9 模块历史日志验证结果：
+
+| 分类 | 模块 |
+| --- | --- |
+| `ExpectedFailure` | `test_ci_sanity_check_fail` |
+| `BuildError` | `test_cpp_extensions_aot_ninja`、`test_cpp_extensions_aot_no_ninja`、`cpp_extensions/test_libtorch_agnostic` |
+| Python traceback | `test_overrides`、`functorch/test_vmap`、`inductor/test_ck_backend`、`inductor/test_reshape_pass` |
+| `RunnerError` | `test_sparse_semi_structured` |
+
+这 9 个模块从 0 条已解析诊断、9 条 unresolved 变为 9 条模块阶段诊断、0 条 unresolved。分类只说明解析完整性：环境、DTK 工具链、PyTorch 代码和故意失败测试本身仍需分别处理。
+
 ## 关键行为对照
 
 | 场景 | 修复前 | 修复后 |
@@ -160,6 +182,7 @@ AssertionError: 1 unit test(s) failed:
 | structured distributed timeout | 已有 nodeid 仍变成 `<process-failure>` | 提取具体 case 并归类为 `Timeout` |
 | `GPU all` / rank 前缀 / `ERROR` | 上下文或 case 可能丢失 | 统一识别并保留 |
 | 非阻塞 text pipe | 可能追加 `NoneType` TypeError | bytes 读取并增量解码 |
+| Normal import/collection/build 已有错误 | 仍合成 `<process-failure>` | 写入 `<module-stage>`，不伪造 case |
 | `mypy runners scripts` | 24 个错误 | 7 个源码文件零错误 |
 
 ## 回归覆盖
@@ -182,6 +205,9 @@ AssertionError: 1 unit test(s) failed:
 - 共享日志不同模块的 case 与 process crash 都被保留，同模块占位行会被具体 case 替代；
 - `GPU all`、rank 前缀 `ERROR` 和只含外层 timeout 的当前 item；
 - queue worker 的非阻塞输出不会再产生 `NoneType` text decoder 异常。
+- Normal 模块级 traceback、构建错误和 runner exception 进入主报告且不计 unresolved；
+- 同模块已有具体 case 时抑制 `<module-stage>` 兜底；
+- 已知 `test_ci_sanity_check_fail` 被标记为 `ExpectedFailure`。
 
 验证命令：
 

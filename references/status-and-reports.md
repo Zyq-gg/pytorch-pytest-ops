@@ -60,8 +60,8 @@ ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 - `<timestamp>/run_test_gpu_*.log`：Normal 合并 worker 日志；
 - `<timestamp>/run_test_gpu_all.log`：Distributed 单 worker 日志；
 - `<timestamp>/process_module_rerun*/`：权威的完整模块补跑日志和 summary；
-- `latest/failure_report.csv`：只包含具体 case nodeid 的召回优先失败候选；
-- `latest/unresolved_process_failures.csv`：没有可靠具体 case 的非零模块结果；
+- `latest/failure_report.csv`：具体 case nodeid 和已诊断 `<module-stage>` import/collection/build/runner 错误的召回优先失败候选；
+- `latest/unresolved_process_failures.csv`：既没有可靠具体 case，也没有可解析模块阶段错误的非零模块结果；
 - `module_status.csv`：每个计划模块的最终状态、elapsed、return code、attempts、timeout 类型/上限、时间和权威 `source_log`；
 - `incomplete_modules.txt`：仍为 MISSING 或 TIMEOUT 的模块；
 - `coverage_report.json`：官方队列覆盖闭合的权威结果；
@@ -78,7 +78,7 @@ ps -ef | grep -E 'run_pytorch|run_test.py|python3 -m pytest' | grep -v grep
 - `TIMEOUT`：被外层 hard/idle watchdog 杀死，不是 coverage 终态；
 - `MISSING`：计划中存在，但没有 checkpoint。
 
-`coverage_report.json.terminal` 只统计 `PASS + FAIL`，不包含 TIMEOUT。只有同时满足以下条件时，`coverage_complete` 才为 `true`：
+`coverage_report.json.terminal` 只统计 `PASS + FAIL`，不包含 TIMEOUT。模块在 import、collection 或扩展构建阶段失败时客观上没有 pytest case；只要日志已解析出明确错误，报告会用 `case_name=<module-stage>` 保留模块名、错误类型、消息和原始日志路径，不再将它计作 unresolved，也不会伪造 `Class::case`。只有同时满足以下条件时，`coverage_complete` 才为 `true`：
 
 - 没有 MISSING；
 - 没有 TIMEOUT；

@@ -1461,15 +1461,15 @@ python3 run_test.py --include <module> --distributed-tests --continue-through-er
 - `.run_test_progress.json`：模块级 checkpoint
 - `.run_manifest.json`：计划、源码、关键环境和语义参数指纹，续跑前校验
 - `run_test_failures.csv`：失败/超时模块列表
-- `failure_report.csv`：从官方 run_test.py 日志中召回的 case 级失败候选；包含稳定失败，也可能包含重试后通过的普通 FAILED
-- `unresolved_process_failures.*`：仍无法映射到具体 case 的模块级 timeout/crash/process 行
+- `failure_report.csv`：从官方 run_test.py 日志中召回的 case 级失败候选，以及已经明确诊断的 `<module-stage>` import/collection/build/runner 错误；包含稳定失败，也可能包含重试后通过的普通 FAILED
+- `unresolved_process_failures.*`：既无法映射到具体 case，也没有可解析模块阶段错误的 timeout/crash/process 行
 - `summary.json`：总体结果、当前 `latest` 日志目录和报告路径
 
 本入口不会生成第 6/7 节的 `module_status.csv`、`coverage_report.json`、`incomplete_modules.txt`，也不会自动执行第二轮完整模块补跑。`run_test_failures.csv` 是模块失败清单，`failure_report.csv` 是 case 解析结果，两者用途不同；模块失败但 case 报告没有对应行时，必须查看 unresolved 和原始模块日志。
 
-### 5.6 distributed 失败 case 抽取逻辑
+### 5.6 official Normal / Distributed 失败抽取逻辑
 
-当前解析器会对 official `run_test.py` 日志做四类抽取，原则是 case 召回优先：宁可保留少量后来通过的 flaky case，也不能因为官方汇总不完整而丢掉已经在日志中出现的失败 nodeid。
+当前解析器会对 official `run_test.py` 日志做五类抽取。前四类在有 pytest case 时遵循召回优先：宁可保留少量后来通过的 flaky case，也不能因为官方汇总不完整而丢掉已经在日志中出现的失败 nodeid。第五类同时适用于 Normal 和 Distributed，用于在 pytest 收集前失败时保留真实模块诊断。
 
 1. 抽取官方稳定失败：
 
@@ -1507,13 +1507,22 @@ AssertionError: 1 unit test(s) failed:
 
 返回码 `124` 归类为具体 case 的 `Timeout`。这类文本常见于 distributed custom handler：子进程先 timeout，随后 traceback/VMFault 打断官方稳定失败汇总；旧解析器虽然能看见 nodeid，却因为它不在前三类标记中而最终只生成 `<process-failure>`。
 
-只要能找到 case 级 `nodeid`，报告器会优先保留具体 case；文件级异常单独留在 unresolved，而不是用下面这种旧占位行代替具体 case：
+5. 当模块在 import、collection、扩展构建或 runner 收尾阶段失败、客观上还没有 pytest case 时，从该模块的 `START` 到 `FAIL` 区段提取：
+
+- Python traceback 的最终异常，例如 `NameError`、`ImportError`、`RuntimeError`、`AssertionError`；
+- 编译器、链接器和 Ninja 的根错误，归类为 `BuildError`；
+- `===== runner exception: ... =====`，归类为 `RunnerError`；
+- 已知的 `test_ci_sanity_check_fail` 故意失败目标，归类为 `ExpectedFailure`。
+
+这类记录使用真实模块文件、`case_name=<module-stage>` 和原始 `source_log`，进入主失败报告但不伪造 `Class::case`。如果同一模块已有具体 case，具体 case 优先，模块阶段兜底行会被抑制。该逻辑由 Normal 与 Distributed 共用，不依赖 `GPU all` 或 rank 前缀。
+
+只要能找到 case 级 `nodeid`，报告器会优先保留具体 case；无法定位 case 但已有明确模块阶段错误时保留 `<module-stage>`。只有两者都没有时才留在 unresolved，而不是用下面这种旧占位行代替具体 case：
 
 ```text
 common_distributed.py <crash>
 ```
 
-这种旧的 process-level 兜底行。
+这种旧的 process-level 兜底行只表示日志中没有足够诊断信号。
 
 确定 nodeid 后，错误信息优先从该 case 所在的 pytest session/case 区间提取，避免相邻 session 的 VMFault、异常或 traceback 串到当前 case；结构不完整的 custom-handler/中断日志提取不到时，仍回退到原来的前 260、后 40 行宽窗口，避免错误字段收紧导致 case 行本身被遗漏。共享 worker 日志中的 process crash 按模块分别过滤：某个模块已有具体 case，不会误删另一个模块的 process crash；同一模块的有/无 `.py` 表示会先规范化再比较。因此 `nodeid` 是主要结论，`error_type/error_message` 是尽力归类字段；distributed 多 rank 交错日志仍应通过 `source_log` 和 `raw` 回查。
 
@@ -1745,8 +1754,8 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
 - `run_test_gpu_<id>.log`：normal 模式每个 GPU worker 的合并日志；同一文件依次包含该 worker 执行的多个模块，以 `START/PASS/FAIL/TIMEOUT` 标记分段，不是每模块一个文件。
 - `process_module_rerun*/run_test_tests.txt`：该轮权威完整模块补跑选择清单。
 - `process_module_rerun*/summary.json`：该轮补跑的模块、timeout 和各 worker PASS/FAIL/TIMEOUT 数。目录存在但没有 summary 表示补跑中断。
-- `latest/failure_report.csv/json/md`：只保存能映射到具体 `file.py::Class::case` nodeid 的失败候选。为避免遗漏，它合并官方稳定失败与普通 pytest FAILED，因此可能包含后来通过的 flaky case；补跑模块的旧部分日志行会被替换。
-- `latest/unresolved_process_failures.*`：官方返回非零但无法映射到可靠 case 的模块级行，例如 custom-handler 编译失败或导入/收集阶段异常。
+- `latest/failure_report.csv/json/md`：保存能映射到具体 `file.py::Class::case` nodeid 的失败候选，以及有明确 import/collection/build/runner 原因的 `<module-stage>` 诊断。为避免遗漏，它合并官方稳定失败与普通 pytest FAILED，因此可能包含后来通过的 flaky case；补跑模块的旧部分日志行会被替换。
+- `latest/unresolved_process_failures.*`：既无法定位具体 case、也没有可解析模块阶段错误的 timeout/crash/process 失败。
 - `summary.json`：当前主计划、最终报告、补跑清单/结果、`progress_stats`、本次 `timeouts` 配置和 coverage 的总索引。
 - `module_status.csv`：计划中的每个模块一行，列中除 `module,status,elapsed,returncode,time` 外还包含 `attempts,timeout_kind,hard_timeout,idle_timeout,source_log`。`PASS` 表示官方进程返回 0；`FAIL` 表示官方进程已经返回非零；`TIMEOUT` 表示被队列外层 watchdog 截断；`MISSING` 表示计划中存在但没有 checkpoint。
 - `incomplete_modules.txt`：仍为 `TIMEOUT` 或缺少 checkpoint 的模块名；完整时为空。
@@ -1757,12 +1766,12 @@ shell 内部已使用 nohup 和 `--fresh`。每个 worker 绑定一张 GPU；每
 - `planned`：`run_test_tests.txt` 模块数。
 - `terminal`：真正完成官方调用的 `PASS + FAIL` 数，不包含 `TIMEOUT`。
 - `pass/fail/timeout/missing`：最终模块状态计数。
-- `unresolved_process_failures`：仍只有模块级结论、没有可靠 case 的报告行数。
+- `unresolved_process_failures`：既没有可靠 case、也没有明确模块阶段诊断的报告行数。
 - `timeout_modules/missing_modules`：对应模块清单。
 - `timeout_details`：每个 timeout 模块的 elapsed、idle/hard 类型、边界和尝试次数；即使主失败 CSV 只有具体 case nodeid，也能从这里确认模块级截断。
 - `coverage_complete`：只有 `timeout == 0`、`missing == 0`、`unresolved_process_failures == 0` 才为 `true`。
 
-因此 `summary.json.progress_stats.completed_records == planned` 仍不代表完整：`TIMEOUT` 也写入 checkpoint。普通 `FAIL` 是官方进程已返回的终态，但如果没有任何可解析 case，它仍会通过 unresolved 让 `coverage_complete` 保持 `false`。
+因此 `summary.json.progress_stats.completed_records == planned` 仍不代表完整：`TIMEOUT` 也写入 checkpoint。普通 `FAIL` 是官方进程已返回的终态。如果没有 case 但能解析出 import/collection/build/runner 错误，它会作为 `<module-stage>` 进入主报告；只有既没有 case 又没有明确模块诊断时，才会通过 unresolved 让 `coverage_complete` 保持 `false`。
 
 直接查看和解释这三个文件：
 
@@ -1772,7 +1781,7 @@ cat /home/tmp/torch2.13/run_test_official_nmz/coverage_report.json
 cat /home/tmp/torch2.13/run_test_official_nmz/incomplete_modules.txt
 ```
 
-例如 `planned=640, terminal=636, timeout=4, missing=0` 表示 640 个计划模块都有 checkpoint，但其中只有 636 个真正从官方进程返回，另 4 个被外层 timeout 截断；此时即使 `completed_records=640`，覆盖仍不完整。`unresolved_process_failures=9` 表示另有 9 条非零模块结果没有可靠 case nodeid，它们会出现在 `unresolved_process_failures.csv`。主 `failure_report.csv` 保持为具体 case 候选表；模块覆盖缺口看另外三类诊断文件。只有 `incomplete_modules.txt` 为空、unresolved 为 0 且 `coverage_complete=true`，才得到完整的模块覆盖和尽量不遗漏的 case 失败候选表。
+例如 `planned=640, terminal=636, timeout=4, missing=0` 表示 640 个计划模块都有 checkpoint，但其中只有 636 个真正从官方进程返回，另 4 个被外层 timeout 截断；此时即使 `completed_records=640`，覆盖仍不完整。`unresolved_process_failures=9` 表示另有 9 条非零模块结果既没有可靠 case nodeid，也没有可解析模块阶段错误，它们会出现在 `unresolved_process_failures.csv`。主 `failure_report.csv` 同时保留具体 case 候选和 `<module-stage>` 诊断；模块覆盖缺口看另外三类诊断文件。只有 `incomplete_modules.txt` 为空、unresolved 为 0 且 `coverage_complete=true`，才得到完整的模块覆盖和尽量不遗漏的失败诊断。
 
 ### 6.5 timeout/crash 处理
 
@@ -1782,9 +1791,9 @@ cat /home/tmp/torch2.13/run_test_official_nmz/incomplete_modules.txt
 
 错误类型和错误消息先在对应 nodeid 的 pytest session/case 区间内提取，找不到信号才回退到宽日志窗口；official 子进程返回码 `124` 会明确归类为 case 级 `Timeout`。队列日志使用原始 bytes 非阻塞读取后增量 UTF-8 解码，避免对 `TextIOWrapper` 设置非阻塞后出现 `TypeError: can't concat NoneType to bytes` 并覆盖真正的子进程结尾。最终报告应优先相信 nodeid；复杂 distributed 多 rank 输出中的 `error_type/error_message` 仍属于辅助诊断字段。
 
-若官方进程在导入/收集、首个 item 前崩溃，官方也可能没有 stepcurrent case。队列会把“checkpoint 为 FAIL 且该模块没有任何可解析失败行”视为疑似进程级中断并完整重跑；最终仍无 case 时保留 `<process-failure>` unresolved 文件级记录，不会静默删除。常见来源包括 custom-handler 的扩展构建失败、模块导入 `ImportError/NameError`，以及特殊 handler 自身返回非零。这些情况客观上没有已执行的 pytest case，不能伪造 `Class::case`。
+若官方进程在导入/收集、首个 item 前失败，官方也可能没有 stepcurrent case。解析器会先从模块区段提取 traceback、编译/链接错误或 runner exception，生成 `<module-stage>` 诊断；这些情况客观上没有已执行的 pytest case，因此不能伪造 `Class::case`。队列只把既没有 case、也没有模块阶段诊断的 FAIL 视为疑似进程级中断并完整重跑；补跑后仍无任何诊断时才保留 `<process-failure>` unresolved。
 
-当前合成的 `<process-failure>` 行只保存模块名、returncode 和 elapsed，`source_log` 为空；原始内容实际位于 `process_module_rerun*/run_test_gpu_*.log` 的对应 `START` 到 `FAIL` 区段，可用模块名搜索。它表示报告可导航性仍有限，不表示日志没有写入。
+当前合成的 `<process-failure>` 行只保存模块名、returncode 和 elapsed，`source_log` 为空；它现在只应出现在对应区段没有可解析诊断时。`<module-stage>` 行则保存真实 `source_log`、错误类型、错误消息和根错误原文，可直接导航到原始模块日志。
 
 若完整补跑仍被 idle 或 hard timeout 截断，checkpoint 保持 `TIMEOUT`，`coverage_complete` 为 `false`，模块一定进入 `timeout_modules`、`timeout_details` 和 `incomplete_modules.txt`。主失败 CSV 只保留截断前已经解析出具体 nodeid 的 case 候选，不再追加模块级 `<timeout>` 占位行；因此必须以 coverage 和 incomplete 清单验收模块完整性。
 
@@ -2091,7 +2100,7 @@ PROCESS_RERUN_ERROR_TYPES=Timeout,Crash \
 bash /workspace/pytorch-pytest-ops/runners/run_test-2.13-official-queue.sh run-distributed
 ```
 
-distributed 正式无人值守运行同样采用 2 小时无输出 + 72 小时 hard watchdog。若补跑仍超时，`coverage_complete` 会变为 `false`，具体模块一定列入 `timeout_modules`、`timeout_details` 和 `incomplete_modules.txt`；主 CSV 继续只保存已定位到具体 nodeid 的 case 候选。distributed 官方 pytest 本身按源码设置 `--reruns=0`，因为该类测试不支持 pytest-rerunfailures；case 继续主要依赖官方 stepcurrent/handler。
+distributed 正式无人值守运行同样采用 2 小时无输出 + 72 小时 hard watchdog。若补跑仍超时，`coverage_complete` 会变为 `false`，具体模块一定列入 `timeout_modules`、`timeout_details` 和 `incomplete_modules.txt`；主 CSV 保存已定位到具体 nodeid 的 case 候选和已诊断 `<module-stage>` 错误。distributed 官方 pytest 本身按源码设置 `--reruns=0`，因为该类测试不支持 pytest-rerunfailures；case 继续主要依赖官方 stepcurrent/handler。
 
 ### 7.3 输出、状态、续跑和结束验收
 
@@ -2246,7 +2255,7 @@ python3 /workspace/pytorch-pytest-ops/scripts/inspect_test_run.py \
 
 ### 8.1 看 CSV 中是否还有 process-level 兜底行
 
-普通 direct-pytest 和第 5 节轻量入口可以检查主 CSV；完整官方队列的主 `failure_report.csv` 按设计只保存具体 case nodeid，模块级异常写在独立 unresolved 报告。通用检查应同时读取两个文件：
+普通 direct-pytest 和第 5 节轻量入口可以检查主 CSV；完整官方队列的主 `failure_report.csv` 保存具体 case nodeid 和已诊断 `<module-stage>` 错误，只有缺少可靠诊断的模块级异常才写入独立 unresolved 报告。通用检查应同时读取两个文件：
 
 ```bash
 python3 - <<'PY'

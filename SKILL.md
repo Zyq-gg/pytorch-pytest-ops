@@ -58,9 +58,9 @@ Require all applicable conditions:
 - Any automatic `process_file_rerun/` that was triggered has its own `summary.json`.
 - No relevant process remains on the machine that actually ran the command.
 
-Treat a concrete `file.py::Class::case` with `error_type=Crash` or `Timeout` as a located case failure, not process-level unresolved. Do not delete it merely to make error-type counts zero.
+Treat a concrete `file.py::Class::case` with `error_type=Crash` or `Timeout` as a located case failure, not process-level unresolved. Also treat a parsed import/collection/build/runner error with `case_name=<module-stage>` as a diagnosed module failure: it belongs in the main report without inventing a pytest case. Reserve unresolved rows for failures that have neither a reliable case nor a concrete module-stage diagnostic.
 
-For the complete official queue, `failure_report.csv` contains only concrete case nodeids, but it is recall-first: official stable summaries and ordinary pytest FAILED lines are merged, so a flaky case that later passed may remain. Read module-level timeout/missing/process failures from `module_status.csv`, `coverage_report.json`, `incomplete_modules.txt`, and `unresolved_process_failures.csv`; use stable case reruns when the user needs a precision-oriented consistently-failing set.
+For the complete official queue, `failure_report.csv` contains concrete case nodeids plus diagnosed `<module-stage>` failures, and it is recall-first: official stable summaries and ordinary pytest FAILED lines are merged, so a flaky case that later passed may remain. Read timeout/missing/truly unresolved process failures from `module_status.csv`, `coverage_report.json`, `incomplete_modules.txt`, and `unresolved_process_failures.csv`; use stable case reruns when the user needs a precision-oriented consistently-failing set.
 
 ### Diagnose count mismatches
 

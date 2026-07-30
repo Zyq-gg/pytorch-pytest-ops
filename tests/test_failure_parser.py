@@ -267,6 +267,117 @@ Running 1 item in this shard: test/distributed/test_timeout.py::Tests::test_acti
         )
         self.assertEqual(rows[0]["error_type"], "Timeout")
 
+    def test_normal_module_stage_tracebacks_are_resolved_diagnostics(self):
+        text = """===== worker 0, GPU 0 =====
+===== 12:00:00 START: inductor/test_ck_backend [1/3] (GPU 0) =====
+===== command: python3 run_test.py --include inductor/test_ck_backend =====
+Traceback (most recent call last):
+  File "test/inductor/test_ck_backend.py", line 260, in TestCKBackend
+    @skipIfRocmArch(MI350_ARCH)
+NameError: name 'skipIfRocmArch' is not defined
+===== 12:00:01 FAIL: inductor/test_ck_backend (1.0s, rc=1) =====
+===== 12:00:02 START: inductor/test_reshape_pass [2/3] (GPU 0) =====
+===== command: python3 run_test.py --include inductor/test_reshape_pass =====
+Traceback (most recent call last):
+  File "test/inductor/test_reshape_pass.py", line 9, in <module>
+ImportError: cannot import name 'HAS_CUDA' from 'torch.testing._internal.inductor_utils'
+===== 12:00:03 FAIL: inductor/test_reshape_pass (1.0s, rc=1) =====
+===== 12:00:04 START: functorch/test_vmap [3/3] (GPU 0) =====
+===== command: python3 run_test.py --include functorch/test_vmap =====
+RuntimeError: Multiple sets of sample_skips_and_xfails defined
+===== 12:00:05 FAIL: functorch/test_vmap (1.0s, rc=1) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_0.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual(
+            {
+                row["test_file"]: (row["error_type"], row["case_name"])
+                for row in rows
+            },
+            {
+                "inductor/test_ck_backend.py": ("NameError", "<module-stage>"),
+                "inductor/test_reshape_pass.py": ("ImportError", "<module-stage>"),
+                "functorch/test_vmap.py": ("RuntimeError", "<module-stage>"),
+            },
+        )
+        self.assertTrue(all(not PARSER.is_process_level_failure(row) for row in rows))
+
+    def test_normal_build_and_runner_errors_are_resolved_diagnostics(self):
+        text = """===== worker 0, GPU 0 =====
+===== 12:00:00 START: test_cpp_extensions_aot_ninja [1/2] (GPU 0) =====
+===== command: python3 run_test.py --include test_cpp_extensions_aot_ninja =====
+/torch/include/ATen/dtk_macros.h:9:2: error: stable API header conflict
+RuntimeError: Error compiling objects for extension
+===== 12:00:01 FAIL: test_cpp_extensions_aot_ninja (1.0s, rc=1) =====
+===== 12:00:02 START: test_sparse_semi_structured [2/2] (GPU 0) =====
+===== command: python3 run_test.py --include test_sparse_semi_structured =====
+Finished test_sparse_semi_structured 1/1
+===== runner exception: TypeError: can't concat NoneType to bytes =====
+===== 12:00:03 FAIL: test_sparse_semi_structured (1.0s, rc=0) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_0.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        by_file = {row["test_file"]: row for row in rows}
+        self.assertEqual(
+            by_file["test_cpp_extensions_aot_ninja.py"]["error_type"],
+            "BuildError",
+        )
+        self.assertIn(
+            "dtk_macros.h",
+            by_file["test_cpp_extensions_aot_ninja.py"]["error_message"],
+        )
+        self.assertEqual(
+            by_file["test_sparse_semi_structured.py"]["error_type"],
+            "RunnerError",
+        )
+        self.assertIn(
+            "NoneType",
+            by_file["test_sparse_semi_structured.py"]["error_message"],
+        )
+        self.assertTrue(all(not PARSER.is_process_level_failure(row) for row in rows))
+
+    def test_known_ci_sanity_failure_is_diagnosed_without_fabricating_case(self):
+        text = """===== worker 0, GPU 0 =====
+===== 12:00:00 START: test_ci_sanity_check_fail [1/1] (GPU 0) =====
+===== command: python3 run_test.py --include test_ci_sanity_check_fail =====
+test_ci_sanity_check_fail 1/1 failed!
+===== 12:00:01 FAIL: test_ci_sanity_check_fail (1.0s, rc=1) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_0.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["error_type"], "ExpectedFailure")
+        self.assertEqual(rows[0]["case_name"], "<module-stage>")
+        self.assertFalse(PARSER.is_process_level_failure(rows[0]))
+
+    def test_concrete_case_suppresses_module_stage_fallback_for_same_module(self):
+        text = """===== worker 0, GPU 0 =====
+===== 12:00:00 START: test_case [1/1] (GPU 0) =====
+===== command: python3 run_test.py --include test_case =====
+Running 1 item in this shard: test/test_case.py::Tests::test_failure
+FAILED test/test_case.py::Tests::test_failure - AssertionError: bad value
+AssertionError: bad value
+===== 12:00:01 FAIL: test_case (1.0s, rc=1) =====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run_test_gpu_0.log"
+            log.write_text(text, encoding="utf-8")
+            rows = PARSER.collect_failures_from_logs(str(log))
+
+        self.assertEqual(
+            [row["nodeid"] for row in rows],
+            ["test_case.py::Tests::test_failure"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

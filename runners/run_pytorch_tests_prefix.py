@@ -93,7 +93,17 @@ CRASH_RE = re.compile(
     r"HSA_STATUS_ERROR[^\s:]*|MEMORY_APERTURE_VIOLATION|KERNEL VMFault)",
     re.IGNORECASE,
 )
+RUNNER_EXCEPTION_RE = re.compile(
+    r"^===== runner exception:\s*(?P<error_type>[A-Za-z_][\w.]*):\s*"
+    r"(?P<message>.*?)\s*=====$"
+)
 PY_FILE_RE = re.compile(r"(?P<file>(?:[\w./+-]+/)?[\w.+-]+\.py)\b")
+KNOWN_EXPECTED_FAILURE_MODULES = {
+    "test_ci_sanity_check_fail": (
+        "ExpectedFailure",
+        "PyTorch CI rerun sanity module is intentionally designed to fail",
+    ),
+}
 FAILURE_CSV_FIELDS = [
     "source_log",
     "gpu",
@@ -1451,6 +1461,33 @@ def make_case_failure_row(
     }
 
 
+def make_module_stage_failure_row(
+    *,
+    source_log: str,
+    gpu: str,
+    module: str,
+    error_type: str,
+    error_message: str,
+    raw: str,
+) -> dict[str, str]:
+    """Represent a diagnosed import/collection/build failure without inventing a case."""
+    test_file = canonical_test_name(module)
+    if not test_file.endswith(".py"):
+        test_file += ".py"
+    return {
+        "source_log": source_log,
+        "gpu": gpu,
+        "test_file": test_file,
+        "class_name": "",
+        "case_name": "<module-stage>",
+        "case_params": "",
+        "error_type": error_type,
+        "error_message": error_message,
+        "nodeid": test_file,
+        "raw": raw,
+    }
+
+
 def normalize_run_test_nodeid(nodeid: str) -> str:
     nodeid = strip_ansi(nodeid).strip().strip("'\"")
     nodeid = re.sub(r"\s*!{5,}.*$", "", nodeid).strip()
@@ -1928,6 +1965,108 @@ def extract_process_failures(text: str, source_log: str) -> list[dict[str, str]]
     return rows
 
 
+def concise_module_stage_error(
+    segment: list[str],
+) -> tuple[str, str, str] | None:
+    """Return a concrete non-case diagnostic from one official module segment."""
+    stripped = [strip_distributed_log_prefix(line) for line in segment]
+
+    for line in reversed(stripped):
+        match = RUNNER_EXCEPTION_RE.match(line)
+        if match:
+            error_type = match.group("error_type")
+            message = match.group("message")
+            return "RunnerError", f"{error_type}: {message}", line
+
+    build_signals: list[str] = []
+    build_noise = (
+        "subprocess-exited-with-error",
+        "failed-wheel-build-for-install",
+        "Failed building wheel",
+        "Error compiling objects for extension",
+    )
+    for line in stripped:
+        if any(marker in line for marker in build_noise):
+            continue
+        if re.search(
+            r"(?i)(?::\s*(?:fatal\s+)?error:|undefined reference|"
+            r"unknown operator .+ in complex symbol|final link failed|"
+            r"collect2:\s*error:|ninja:\s*build stopped)",
+            line,
+        ):
+            concise = shorten_text(line)
+            if concise not in build_signals:
+                build_signals.append(concise)
+    if build_signals:
+        message = shorten_text("; ".join(build_signals[:3]))
+        return "BuildError", message, build_signals[0]
+
+    error = concise_run_test_error("\n".join(segment))
+    error_type, error_message = split_error_loose(error)
+    if error_type in {"Crash", "Timeout"}:
+        return None
+    if error_type:
+        return error_type, error_message, error
+    if error:
+        return "ModuleError", error, error
+    return None
+
+
+def extract_module_stage_failures(
+    text: str, source_log: str
+) -> list[dict[str, str]]:
+    """Extract diagnosed import/collection/build failures for Normal and Distributed."""
+    rows: list[dict[str, str]] = []
+    lines = strip_ansi(text).splitlines()
+    current_module = ""
+    current_gpu = parse_gpu_from_log(source_log)
+    segment_start = -1
+
+    for idx, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        start = START_RE.match(line)
+        if start:
+            current_module = start.group(1)
+            current_gpu = start.group(2)
+            segment_start = idx
+            continue
+
+        end = END_RE.match(line)
+        if not end or not current_module or segment_start < 0:
+            continue
+
+        status, ended_module = end.groups()
+        if canonical_test_module(ended_module) != canonical_test_module(current_module):
+            continue
+
+        if status == "FAIL":
+            segment = lines[segment_start : idx + 1]
+            diagnostic = concise_module_stage_error(segment)
+            if diagnostic is None:
+                expected = KNOWN_EXPECTED_FAILURE_MODULES.get(
+                    canonical_test_module(current_module)
+                )
+                if expected is not None:
+                    diagnostic = (expected[0], expected[1], line)
+            if diagnostic is not None:
+                error_type, error_message, raw = diagnostic
+                rows.append(
+                    make_module_stage_failure_row(
+                        source_log=source_log,
+                        gpu=current_gpu,
+                        module=current_module,
+                        error_type=error_type,
+                        error_message=error_message,
+                        raw=raw,
+                    )
+                )
+
+        current_module = ""
+        segment_start = -1
+
+    return rows
+
+
 def extract_global_crashes(text: str, source_log: str) -> list[dict[str, str]]:
     current_gpu = parse_gpu_from_log(source_log)
     current_module = ""
@@ -2070,6 +2209,7 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
             if row.get("nodeid", "") not in known_case_nodeids
         ]
         timeout_rows = extract_official_timeout_current_failures(text, log_file) if is_official else []
+        module_stage_rows = extract_module_stage_failures(text, log_file)
         if is_official:
             # Stable run_test.py summaries are authoritative, but a shared
             # worker log can also contain a different module that terminated
@@ -2078,6 +2218,16 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
             parsed_rows = official_rows + summary_rows + structured_rows + timeout_rows
         else:
             parsed_rows = summary_rows
+        case_modules = {
+            canonical_test_module(row.get("test_file", ""))
+            for row in parsed_rows
+            if "::" in row.get("nodeid", "")
+        }
+        parsed_rows.extend(
+            row
+            for row in module_stage_rows
+            if canonical_test_module(row.get("test_file", "")) not in case_modules
+        )
         has_case_rows = any("::" in row.get("nodeid", "") for row in parsed_rows)
         raw_process_rows = extract_process_failures(text, log_file)
         recovered_files_in_log = completed_recovery_files(text)
@@ -2090,11 +2240,6 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
             if canonical_test_module(row["test_file"]) not in recovered_modules_in_log
         ]
         if is_official and has_case_rows:
-            case_modules = {
-                canonical_test_module(row.get("test_file", ""))
-                for row in parsed_rows
-                if "::" in row.get("nodeid", "")
-            }
             parsed_rows.extend(
                 row
                 for row in process_rows
@@ -2109,6 +2254,7 @@ def collect_failures_from_logs(path: str) -> list[dict[str, str]]:
             and not summary_rows
             and not structured_rows
             and not timeout_rows
+            and not module_stage_rows
         ):
             parsed_rows.extend(
                 row
@@ -2333,6 +2479,8 @@ def generate_failure_reports_from_rows(
 
 
 def is_process_level_failure(row: dict[str, str]) -> bool:
+    if row.get("case_name") == "<module-stage>":
+        return False
     return "::" not in row.get("nodeid", "") or row.get("case_name", "").startswith("<")
 
 
