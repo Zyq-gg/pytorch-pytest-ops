@@ -212,10 +212,9 @@ python3 -m pytest --version
 ```text
 PYTORCH_TEST_WITH_ROCM=1
 CONTINUE_THROUGH_ERROR=True
-MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC=1
 ```
 
-它们用于本仓库面向 ROCm 的默认测试语义，会覆盖启动 shell 中同名变量。其他变量从启动环境继承。若目标不是 ROCm 或需要改变这三项，当前脚本没有 CLI 开关；应先评估并修改 runner 默认值，同时使用全新 work-dir，不能把不同默认语义混入旧 checkpoint。
+它们用于本仓库面向 ROCm 的默认测试语义，会覆盖启动 shell 中同名变量。其他变量从启动环境继承，其中 `MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC` 未设置时保持未设置，显式设置时原样传入所有测试子进程。若目标不是 ROCm 或需要改变上述固定项，当前脚本没有 CLI 开关；应先评估并修改 runner 默认值，同时使用全新 work-dir，不能把不同默认语义混入旧 checkpoint。
 
 如果没有 `rg`，本文中的进程查询可以用：
 

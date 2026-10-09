@@ -35,7 +35,6 @@ from run_manifest import build_run_manifest, ensure_run_manifest
 DEFAULT_TEST_ENV = {
     "PYTORCH_TEST_WITH_ROCM": "1",
     "CONTINUE_THROUGH_ERROR": "True",
-    "MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC": "1",
 }
 
 CRASH_RE = re.compile(

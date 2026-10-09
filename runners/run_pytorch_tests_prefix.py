@@ -53,7 +53,6 @@ DEFAULT_DRY_RUN_ARGS = ["--exclude-jit-executor", "--exclude-distributed-tests"]
 DEFAULT_TEST_ENV = {
     "PYTORCH_TEST_WITH_ROCM": "1",
     "CONTINUE_THROUGH_ERROR": "True",
-    "MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC": "1",
 }
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 SHORT_SUMMARY_RE = re.compile(r"\bshort test summary info\b", re.IGNORECASE)

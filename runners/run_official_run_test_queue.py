@@ -43,7 +43,6 @@ from run_manifest import build_run_manifest, ensure_run_manifest
 DEFAULT_TEST_ENV = {
     "PYTORCH_TEST_WITH_ROCM": "1",
     "CONTINUE_THROUGH_ERROR": "True",
-    "MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC": "1",
 }
 
 TEST_LINE_RE = re.compile(r"^\s{2,}(.+?)\s+\d+/\d+\s*$")

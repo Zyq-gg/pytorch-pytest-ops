@@ -276,7 +276,8 @@ runner 会把计划、PyTorch 源码、关键环境和语义参数的指纹写�
 ```text
 PYTORCH_TEST_WITH_ROCM=1
 CONTINUE_THROUGH_ERROR=True
-MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC=1
 ```
+
+`MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC` 不再由 runner 设置；未在启动环境中设置时保持未设置，显式设置时原样传递给 dry-run、正式运行、自动补跑和续跑。该变量属于 manifest 跟踪的语义环境，续跑期间不能改变。
 
 这套 runner 当前面向 ROCm 测试环境；迁移到 CUDA 或 CPU 环境前应先检查并调整源码中的默认环境策略。

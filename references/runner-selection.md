@@ -100,4 +100,4 @@ $OPS_ROOT/runners/run_pytorch_subset.py run-test-resume
 
 ## 当前适用环境
 
-这些 runner 会强制设置 ROCm 相关默认测试环境，包括 `PYTORCH_TEST_WITH_ROCM=1` 和 MIOpen 配置，因此当前实现是 ROCm 定向的 PyTorch 测试运维工具。CUDA 或 CPU 环境不能只替换 GPU ID 就直接复用；应先审查 runner 的默认环境和设备可见性设置。
+这些 runner 会强制设置 `PYTORCH_TEST_WITH_ROCM=1` 等 ROCm 测试默认值，因此当前实现是 ROCm 定向的 PyTorch 测试运维工具。MIOpen 配置从启动环境继承。CUDA 或 CPU 环境不能只替换 GPU ID 就直接复用；应先审查 runner 的默认环境和设备可见性设置。
