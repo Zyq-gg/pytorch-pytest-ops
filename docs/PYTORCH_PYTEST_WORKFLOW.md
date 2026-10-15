@@ -1123,6 +1123,17 @@ python3 /workspace/pytorch-pytest-ops/runners/run_pytorch_subset.py pytest-failu
 
 它读取 `failure_report.csv`、`stable_failures.csv` 或 `rerun_all_results.csv`，规范化并按 `nodeid` 去重。默认跳过没有 `::` 的文件级 process row；这些行应先按 3.3 补成 case 级结果。每个 case 最多运行 `--attempts N` 次，一旦有一次 PASS 就提前停止；只有连续 N 次都失败，才写入 `stable_failures.csv`。timeout/crash 都按一次失败处理。
 
+如果历史输入是中文测试总结 CSV，列为 `py 文件`、`类名`、`case 名`、`错误类型及信息`，先运行：
+
+```bash
+python3 /workspace/pytorch-pytest-ops/scripts/convert_test_summary_csv.py \
+  '/path/to/测试总结.csv' \
+  /path/to/converted_failure_report.csv \
+  --pytorch-root /workspace/pytorch
+```
+
+转换器会补全 `test/` 前缀，保留参数化 case 名，生成精确 `nodeid`，并按 nodeid 去重。文件级记录会转成 `case_name=<module-stage>` 且 nodeid 只保留文件路径，因此会被默认稳定 case 重测跳过。`--pytorch-root` 只校验具体 case 的文件，不会把没有同名 `.py` 的官方 virtual/custom-handler 模块误报为具体 case 缺失。
+
 第 6/7 节官方队列的初始 `failure_report.csv` 采用召回优先，可能包含重试后通过的普通 FAILED；本节正是把“失败候选”收敛为“连续 N 次仍失败”的精确集合。不要直接把初始 CSV 行数当作稳定失败数。
 
 稳定失败重测不使用 `--rs/--scs`：它的输入本来就是一个精确 `file.py::Class::case`，每次尝试只运行该 case，不存在“从文件中当前 case 后继续”的需求。某次单 case 进程 crash/timeout 会被记录为该 nodeid 的一次失败，再按 `--attempts` 重试。文件级 `<crash>/<timeout>` 默认不会进入本脚本，应先通过 3.3 定位为 case。
@@ -1971,6 +1982,8 @@ echo $! > /home/tmp/torch2.13/run_test_official_nmz/stable_rerun_official_3x/run
 ```
 
 每次实际执行 `run_test.py --include <module> --pytest-single-test <file.py::Class::case>`。输出、checkpoint、筛选、续跑和稳定失败判定与第 4 节一致；续跑去掉 `--fresh`。process-level 行默认跳过，应先用 6.8 补成 case。
+
+如果同一份 CSV 同时包含 Normal 和 Distributed 具体 case，并且要求作为一个官方稳定重测任务执行，应省略 `--gpu-ids`。这样 runner 只启动一个 worker，串行执行所有 case，且每个 case 都继承全部可见 GPU。显式 `--include <module>` 足以选中 distributed 模块；不要在混合清单上全局传 `--distributed-tests`，因为它会改变普通模块的选择语义。该任务不应与其他 GPU 任务同时运行。
 
 ### 6.10 查询某个 case
 

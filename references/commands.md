@@ -142,6 +142,17 @@ echo $! > "$WORK/runner.pid"
 
 ## 稳定失败 case 重测
 
+输入是中文测试总结表时，先转成 `failure_report.csv` 格式：
+
+```bash
+python3 "$OPS_ROOT/scripts/convert_test_summary_csv.py" \
+  /path/to/test-summary.csv \
+  /path/to/converted_failure_report.csv \
+  --pytorch-root "$PYTORCH_ROOT"
+```
+
+具体 case 会生成精确 nodeid；文件级行会生成 `<module-stage>` 记录并被下面的默认重测跳过。先使用 `--dry-run-list` 核对 `Unique rerun rows` 和 `Missing targets`。
+
 ```bash
 test -z "${ENV_SH:-}" || source "$ENV_SH"
 
@@ -161,6 +172,8 @@ echo $! > "$WORK/runner.pid"
 ```
 
 默认跳过没有具体 `::case` 的 process-level 行。某个 case 一旦 PASS 就停止继续尝试；只有连续达到 `--attempts` 次且从未 PASS，才写入 `stable_failures.csv`。需要按 CSV 任意列筛选时，先查看当前 `--help` 中的 `--filter-column`、`--filter-equals`、`--filter-contains` 和 `--filter-regex`。
+
+混合 Normal/Distributed 并明确要用官方入口一起重测时，加 `--runner official` 且省略 `--gpu-ids`。这样会用一个 worker 串行运行，每个 case 都继承全部可见 GPU；不要全局添加 `--distributed-tests`。
 
 ## 轻量官方 Distributed 续跑
 

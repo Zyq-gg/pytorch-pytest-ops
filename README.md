@@ -20,6 +20,7 @@ PyTorch 测试并不只有一种入口。本项目所在环境同时使用：
 - 生成直接 pytest 文件全量、子集、增量和续跑命令
 - 根据已有 `failure_report.csv` 补跑文件级 timeout/crash
 - 生成稳定失败 case 重测命令
+- 把“py 文件/类名/case 名/错误类型及信息”格式的中文测试总结 CSV 转成可直接重测的 `failure_report.csv`
 - 保持自定义环境变量在首次运行和续跑之间一致
 - 检查计划清单、checkpoint、summary 和最终报告是否对齐
 - 检查官方队列的 `module_status.csv`、`coverage_report.json` 和 `incomplete_modules.txt`

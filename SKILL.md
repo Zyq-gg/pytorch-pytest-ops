@@ -1,6 +1,6 @@
 ---
 name: pytorch-pytest-ops
-description: Operate and diagnose PyTorch pytest and official run_test.py workflows using the runners bundled with this skill. Use for exact dry-run, full-run, subset, distributed, resume, rerun, stable-failure, nohup, environment-variable, status-inspection, completion-validation, case-query, log parsing, or failure-report commands; explain timeout/crash recovery and reports; or maintain the workflow documentation.
+description: Operate and diagnose PyTorch pytest and official run_test.py workflows using the runners bundled with this skill. Use for exact dry-run, full-run, subset, distributed, resume, rerun, stable-failure, localized summary CSV conversion, nohup, environment-variable, status-inspection, completion-validation, case-query, log parsing, or failure-report commands; explain timeout/crash recovery and reports; or maintain the workflow documentation.
 ---
 
 # PyTorch Pytest Operations
@@ -17,6 +17,7 @@ Use the bundled runner source as the authority and give commands that are direct
 3. Inspect the relevant bundled runner source or `--help` before composing commands. Do not rely on remembered flags when the source is available.
 4. Read only the relevant workflow section. Use `grep -n`, `sed`, or `rg` when installed.
 5. Preserve user-provided work directories, environment variables, GPU IDs, timeout values, and runner choice across resume commands.
+6. When the input is a localized test-summary CSV instead of a native runner report, inspect its headers and use `$OPS_ROOT/scripts/convert_test_summary_csv.py`. Validate the converted plan with the selected runner's dry-run before starting tests.
 
 Read [references/runner-selection.md](references/runner-selection.md) when choosing an entry point. Read [references/commands.md](references/commands.md) for command templates. Read [references/status-and-reports.md](references/status-and-reports.md) when inspecting a run or explaining outputs.
 
@@ -33,6 +34,12 @@ Read [references/runner-selection.md](references/runner-selection.md) when choos
    Current runners persist these semantics in `<work-dir>/.run_manifest.json` and reject mismatched resumes before replacing the saved plan. Do not delete the manifest to bypass this check. A legacy checkpoint adopted without an older manifest remains explicitly unverified.
 6. For the official queue, preserve both hard and idle timeout settings. The current shell defaults are 72 hours hard and 2 hours without subprocess output for initial and process-rerun modules.
 7. After every run command, provide output paths, status commands, resume behavior, and completion checks.
+
+### Convert a localized failure summary
+
+Use `scripts/convert_test_summary_csv.py` for tables whose rows contain a test file, class, case, and error but no native `nodeid`. Its default columns are `py 文件`, `类名`, `case 名`, and `错误类型及信息`; use the column override flags for other headers. Concrete rows become exact `test/file.py::Class::case` nodeids. File-level rows become diagnosed `<module-stage>` rows and remain excluded from stable case reruns unless the user explicitly requests process-level execution. Pass `--pytorch-root` to validate concrete test-file targets, then require the stable runner's `Unique rerun rows` and `Missing targets` dry-run counts before a long run.
+
+For a mixed Normal/Distributed CSV that the user explicitly wants to run as one official stable-rerun queue, omit `--gpu-ids` so a single worker inherits all visible devices. Do not add `--distributed-tests` globally: explicit `--include <module>` selects distributed modules, while the global flag can change selection semantics for ordinary modules. This mixed mode is serial and should not overlap other GPU jobs.
 
 ### Inspect a directory
 

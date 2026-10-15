@@ -74,6 +74,8 @@ $OPS_ROOT/runners/rerun_stable_failures.py
 
 默认使用 direct pytest 执行；需要官方 custom handler 语义时可使用 `--runner official`，并通过可重复的 `--official-run-test-arg` 传递额外官方参数。
 
+如果输入是只有“py 文件/类名/case 名/错误类型及信息”的中文汇总表，先用 `$OPS_ROOT/scripts/convert_test_summary_csv.py` 转成 runner 原生列和 `nodeid`。转换器把文件级记录标记为 `<module-stage>`；稳定 case runner 默认跳过它们。混合 Normal/Distributed 的官方 case 清单若明确要一起重测，不传 `--gpu-ids`，让单 worker 串行执行并继承全部可见 GPU。
+
 ## 轻量官方 run_test.py 入口
 
 以下入口只用于轻量串行模块执行、distributed 探索和旧 work-dir 兼容：
