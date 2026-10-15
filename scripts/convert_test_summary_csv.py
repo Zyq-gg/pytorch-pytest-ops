@@ -37,7 +37,7 @@ def normalize_test_file(value: str) -> str:
         raise ValueError("empty test file")
     if name.startswith("/") or ".." in Path(name).parts:
         raise ValueError(f"test file must be relative and remain under test/: {value!r}")
-    return name if name.startswith("test/") else f"test/{name}"
+    return name.removeprefix("test/")
 
 
 def split_error(value: str, *, module_stage: bool) -> tuple[str, str]:

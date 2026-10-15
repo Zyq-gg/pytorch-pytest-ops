@@ -1132,7 +1132,7 @@ python3 /workspace/pytorch-pytest-ops/scripts/convert_test_summary_csv.py \
   --pytorch-root /workspace/pytorch
 ```
 
-转换器会补全 `test/` 前缀，保留参数化 case 名，生成精确 `nodeid`，并按 nodeid 去重。文件级记录会转成 `case_name=<module-stage>` 且 nodeid 只保留文件路径，因此会被默认稳定 case 重测跳过。`--pytorch-root` 只校验具体 case 的文件，不会把没有同名 `.py` 的官方 virtual/custom-handler 模块误报为具体 case 缺失。
+转换器会使用相对 `<pytorch-root>/test` 的原生文件路径（输入已有 `test/` 前缀时会移除），保留参数化 case 名，生成精确 `file.py::Class::case` nodeid，并按 nodeid 去重。文件级记录会转成 `case_name=<module-stage>` 且 nodeid 只保留文件路径，因此会被默认稳定 case 重测跳过。`--pytorch-root` 只校验具体 case 的文件，不会把没有同名 `.py` 的官方 virtual/custom-handler 模块误报为具体 case 缺失。
 
 第 6/7 节官方队列的初始 `failure_report.csv` 采用召回优先，可能包含重试后通过的普通 FAILED；本节正是把“失败候选”收敛为“连续 N 次仍失败”的精确集合。不要直接把初始 CSV 行数当作稳定失败数。
 

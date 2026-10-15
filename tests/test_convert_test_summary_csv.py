@@ -41,12 +41,26 @@ class ConvertTestSummaryCsvTest(unittest.TestCase):
         self.assertEqual(stats["module_stage_rows"], 1)
         self.assertEqual(
             converted[0]["nodeid"],
-            "test/inductor/test_example.py::TestExample::test_value[dtype-float32]",
+            "inductor/test_example.py::TestExample::test_value[dtype-float32]",
         )
         self.assertEqual(converted[0]["error_type"], "AssertionError")
         self.assertEqual(converted[1]["case_name"], "<module-stage>")
-        self.assertEqual(converted[1]["nodeid"], "test/test_import.py")
-        self.assertEqual(converted[2]["nodeid"], "test/test_function.py::test_top_level")
+        self.assertEqual(converted[1]["nodeid"], "test_import.py")
+        self.assertEqual(converted[2]["nodeid"], "test_function.py::test_top_level")
+
+    def test_removes_existing_test_prefix_to_match_native_reports(self):
+        row = {
+            "py 文件": "test/distributed/test_example.py",
+            "类名": "Tests",
+            "case 名": "test_case",
+            "错误类型及信息": "AssertionError: bad",
+        }
+        converted, _ = CONVERTER.convert_rows([row])
+        self.assertEqual(converted[0]["test_file"], "distributed/test_example.py")
+        self.assertEqual(
+            converted[0]["nodeid"],
+            "distributed/test_example.py::Tests::test_case",
+        )
 
     def test_deduplicates_nodeids(self):
         row = {
